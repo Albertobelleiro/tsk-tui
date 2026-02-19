@@ -1,6 +1,28 @@
 {
   "name": "tsk",
-  "version": "0.2.0",
+  "version": "0.2.1",
+  "description": "Fast keyboard-driven terminal task manager with CLI, TUI, and multi-provider sync.",
+  "author": "Alberto Belleiro",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/Albertobelleiro/tsk-tui.git"
+  },
+  "bugs": {
+    "url": "https://github.com/Albertobelleiro/tsk-tui/issues"
+  },
+  "homepage": "https://github.com/Albertobelleiro/tsk-tui#readme",
+  "keywords": [
+    "tui",
+    "cli",
+    "task-manager",
+    "terminal",
+    "bun",
+    "productivity"
+  ],
+  "engines": {
+    "bun": ">=1.2.0"
+  },
   "type": "module",
   "private": true,
   "bin": {

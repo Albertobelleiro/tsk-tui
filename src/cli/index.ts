@@ -228,7 +228,7 @@ function formatMinutes(m: number): string {
 
 // ── Help texts ───────────────────────────────────────
 
-const HELP_MAIN = `tsk — terminal task manager v0.2.0
+const HELP_MAIN = `tsk — terminal task manager v0.2.1
 
 Usage:
   tsk                          Open interactive TUI
@@ -1929,7 +1929,7 @@ export async function runCLI(args: string[]): Promise<number> {
   }
 
   if (hasFlag(args, "--version", "-v")) {
-    console.log("tsk v0.2.0");
+    console.log("tsk v0.2.1");
     return EXIT_OK;
   }
 

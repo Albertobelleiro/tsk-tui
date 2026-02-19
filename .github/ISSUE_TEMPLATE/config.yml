@@ -1,0 +1,8 @@
+blank_issues_enabled: false
+contact_links:
+  - name: Security Reports
+    url: https://github.com/Albertobelleiro/tsk-tui/security/advisories/new
+    about: Please report security vulnerabilities privately via Security Advisories.
+  - name: General Support
+    url: https://github.com/Albertobelleiro/tsk-tui/discussions
+    about: Ask questions and get help in Discussions.

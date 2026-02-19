@@ -1,0 +1,13 @@
+# Default owner
+* @Albertobelleiro
+
+# CI and release automation
+/.github/workflows/ @Albertobelleiro
+
+# Core task engine
+/src/store/ @Albertobelleiro
+/src/cli/ @Albertobelleiro
+
+# Integrations and sync
+/src/integrations/ @Albertobelleiro
+/src/config/ @Albertobelleiro

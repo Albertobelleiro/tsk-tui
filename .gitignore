@@ -5,6 +5,7 @@ node_modules
 out
 dist
 *.tgz
+*.bun-build
 
 # code coverage
 coverage
@@ -12,8 +13,8 @@ coverage
 
 # logs
 logs
-_.log
-report.[0-9]_.[0-9]_.[0-9]_.[0-9]_.json
+*.log
+report.[0-9]*.[0-9]*.[0-9]*.[0-9]*.json
 
 # dotenv environment variable files
 .env
@@ -32,6 +33,7 @@ report.[0-9]_.[0-9]_.[0-9]_.[0-9]_.json
 
 # Finder (MacOS) folder config
 .DS_Store
+._*
 
 # Backups
 *.bak
@@ -43,3 +45,8 @@ website/dist
 assets/**/*.psd
 assets/**/*.ai
 assets/**/*.fig
+
+# Internal / local-only workflow artifacts
+.agents/
+.claude/
+prompts/

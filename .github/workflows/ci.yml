@@ -22,7 +22,7 @@ jobs:
         run: bun install
 
       - name: TypeScript check
-        run: bun run tsc --noEmit
+        run: bun run typecheck
 
       - name: Run tests
         run: bun test

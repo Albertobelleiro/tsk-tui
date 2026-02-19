@@ -41,7 +41,7 @@ export function HelpView({ onClose }: HelpViewProps) {
         borderStyle="single"
         borderColor={colors.borderFocus}
         border={true}
-        title="tsk v0.2 Keybindings"
+        title="tsk v0.2.1 Keybindings"
         paddingLeft={2}
         paddingRight={2}
         paddingTop={1}

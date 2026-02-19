@@ -13,6 +13,9 @@ jobs:
           - os: macos-latest
             target: bun-darwin-arm64
             artifact: tsk-darwin-arm64
+          - os: macos-latest
+            target: bun-darwin-x64
+            artifact: tsk-darwin-x64
           - os: ubuntu-latest
             target: bun-linux-x64
             artifact: tsk-linux-x64

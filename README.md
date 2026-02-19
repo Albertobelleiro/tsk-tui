@@ -3,6 +3,10 @@
 **A fast, keyboard-driven task manager for the terminal.**
 No browser. No Electron. No mouse required.
 
+[![CI](https://github.com/Albertobelleiro/tsk-tui/actions/workflows/ci.yml/badge.svg)](https://github.com/Albertobelleiro/tsk-tui/actions/workflows/ci.yml)
+[![Release](https://github.com/Albertobelleiro/tsk-tui/actions/workflows/release.yml/badge.svg)](https://github.com/Albertobelleiro/tsk-tui/actions/workflows/release.yml)
+[![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
+
 ![tsk — Task List view with detail panel](assets/screenshots/tsk-task-list.png)
 
 ---
@@ -462,8 +466,18 @@ bun run dev          # Watch mode with hot reload
 bun run typecheck    # TypeScript check
 bun test             # Run tests
 bun run build        # Compile binary for current platform → dist/tsk
-bun run build:all    # Cross-compile: darwin-arm64, linux-x64, linux-arm64
+bun run build:all    # Cross-compile: darwin-arm64, darwin-x64, linux-x64, linux-arm64
 ```
+
+### Environment variables
+
+Use `.env.example` as a reference for optional integration credentials:
+
+```bash
+cp .env.example .env
+```
+
+Only set the variables you need for the providers you use.
 
 ### Project structure
 
@@ -491,6 +505,20 @@ src/utils/                   Date formatting and due-date helpers
 
 ---
 
+## Project documentation
+
+- Contribution guide: [CONTRIBUTING.md](CONTRIBUTING.md)
+- Code of Conduct: [CODE_OF_CONDUCT.md](CODE_OF_CONDUCT.md)
+- Security policy: [SECURITY.md](SECURITY.md)
+- Support channels: [SUPPORT.md](SUPPORT.md)
+- Governance model: [GOVERNANCE.md](GOVERNANCE.md)
+- Changelog: [CHANGELOG.md](CHANGELOG.md)
+- Releasing guide: [docs/RELEASING.md](docs/RELEASING.md)
+- Architecture overview: [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md)
+- Asset and brand usage: [ASSETS_LICENSE.md](ASSETS_LICENSE.md), [TRADEMARKS.md](TRADEMARKS.md)
+
+---
+
 ## Tech stack
 
 | Layer | Technology |
@@ -507,4 +535,4 @@ src/utils/                   Date formatting and due-date helpers
 
 ## License
 
-MIT
+[MIT](LICENSE)
