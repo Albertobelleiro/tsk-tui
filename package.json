@@ -9,6 +9,7 @@
   "scripts": {
     "dev": "bun run --watch bin/tsk.tsx",
     "start": "bun run bin/tsk.tsx",
+    "test": "bun test",
     "typecheck": "tsc --noEmit",
     "build": "bun build --compile bin/tsk.tsx --outfile dist/tsk",
     "build:all": "bun run build:darwin-arm64 && bun run build:darwin-x64 && bun run build:linux-x64 && bun run build:linux-arm64",
@@ -25,6 +26,7 @@
   },
   "dependencies": {
     "@opentui/core": "0.1.80",
-    "@opentui/react": "^0.1.80"
+    "@opentui/react": "^0.1.80",
+    "zod": "^4.3.6"
   }
 }

@@ -14,6 +14,8 @@ interface StatusBarProps {
   timerText?: string | null;
   showClock?: boolean;
   visualCount?: number;
+  persistenceError?: string | null;
+  hasPendingSave?: boolean;
 }
 
 export function StatusBar({
@@ -29,6 +31,8 @@ export function StatusBar({
   timerText = null,
   showClock = true,
   visualCount = 0,
+  persistenceError = null,
+  hasPendingSave = false,
 }: StatusBarProps) {
   const [clock, setClock] = useState(formatClock());
 
@@ -88,6 +92,18 @@ export function StatusBar({
         <>
           <text content="│" fg={colors.border} />
           <text content={` ⏱ ${timerText} `} fg={colors.yellow} attributes={1} />
+        </>
+      ) : null}
+      {hasPendingSave ? (
+        <>
+          <text content="│" fg={colors.border} />
+          <text content=" Unsaved (retrying) " fg={colors.yellow} attributes={1} />
+        </>
+      ) : null}
+      {persistenceError ? (
+        <>
+          <text content="│" fg={colors.border} />
+          <text content={` Save error: ${persistenceError} `} fg={colors.red} attributes={1} />
         </>
       ) : null}
       {message ? (

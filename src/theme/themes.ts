@@ -170,3 +170,24 @@ export const THEMES: Record<ThemeName, ThemeColors> = {
 export const THEME_NAMES: ThemeName[] = [
   "tokyo-night", "catppuccin", "gruvbox", "nord", "dracula", "solarized-dark",
 ];
+
+export const MONOCHROME_THEME: ThemeColors = {
+  bg: "black",
+  bgDark: "black",
+  bgHighlight: "gray",
+  bgModal: "black",
+  fg: "white",
+  fgDim: "gray",
+  fgBright: "white",
+  accent: "white",
+  accentAlt: "white",
+  green: "white",
+  yellow: "white",
+  red: "white",
+  orange: "white",
+  cyan: "white",
+  border: "gray",
+  borderFocus: "white",
+  priority: { urgent: "white", high: "white", medium: "white", low: "white", none: "gray" },
+  status: { todo: "gray", in_progress: "white", done: "white", archived: "gray" },
+};

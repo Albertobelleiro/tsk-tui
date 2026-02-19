@@ -19,19 +19,55 @@ const EXIT_VALIDATION = 4;
 
 // ── Arg parsing helpers ──────────────────────────────
 
-function getFlag(args: string[], long: string, short?: string): string | undefined {
+const FLAGS_WITH_VALUE = new Set([
+  "--priority", "-p", "--project", "-P", "--tag", "-t",
+  "--due", "-d", "--desc", "--title", "--status", "--sort",
+  "--subtask-of", "--under", "--format", "--recur",
+  "--estimate", "--api-key", "--token", "--repo", "--team",
+  "--workspace",
+]);
+
+type FlagReadResult =
+  | { state: "absent" }
+  | { state: "missing" }
+  | { state: "value"; value: string };
+
+function readFlag(args: string[], long: string, short?: string): FlagReadResult {
   for (let i = 0; i < args.length; i++) {
-    if (args[i] === long || (short && args[i] === short)) {
-      return args[i + 1];
+    const token = args[i]!;
+    if (token === long || (short && token === short)) {
+      const value = args[i + 1];
+      if (value === undefined || value.startsWith("-")) {
+        return { state: "missing" };
+      }
+      return { state: "value", value };
     }
-    if (args[i]!.startsWith(long + "=")) {
-      return args[i]!.slice(long.length + 1);
+    if (token.startsWith(long + "=")) {
+      return { state: "value", value: token.slice(long.length + 1) };
     }
-    if (short && args[i]!.startsWith(short + "=")) {
-      return args[i]!.slice(short.length + 1);
+    if (short && token.startsWith(short + "=")) {
+      return { state: "value", value: token.slice(short.length + 1) };
     }
   }
-  return undefined;
+  return { state: "absent" };
+}
+
+function getFlag(args: string[], long: string, short?: string): string | undefined {
+  const result = readFlag(args, long, short);
+  return result.state === "value" ? result.value : undefined;
+}
+
+function findFirstMissingFlagValue(args: string[]): string | null {
+  for (let i = 0; i < args.length; i++) {
+    const token = args[i]!;
+    if (!FLAGS_WITH_VALUE.has(token)) continue;
+    if (token.includes("=")) continue;
+    const value = args[i + 1];
+    if (value === undefined || value.startsWith("-")) {
+      return token;
+    }
+  }
+  return null;
 }
 
 function hasFlag(args: string[], long: string, short?: string): boolean {
@@ -40,18 +76,11 @@ function hasFlag(args: string[], long: string, short?: string): boolean {
 
 function positionalArgs(args: string[]): string[] {
   const result: string[] = [];
-  const flagsWithValue = new Set([
-    "--priority", "-p", "--project", "-P", "--tag", "-t",
-    "--due", "-d", "--desc", "--title", "--status", "--sort",
-    "--subtask-of", "--under", "--format", "--recur",
-    "--estimate", "--api-key", "--token", "--repo", "--team",
-    "--workspace",
-  ]);
   for (let i = 0; i < args.length; i++) {
     const a = args[i]!;
     if (a.startsWith("-")) {
       // skip flag value if it takes one
-      if (flagsWithValue.has(a) && !a.includes("=")) i++;
+      if (FLAGS_WITH_VALUE.has(a) && !a.includes("=")) i++;
       continue;
     }
     result.push(a);
@@ -66,6 +95,10 @@ type ResolveResult =
   | { ok: false; code: number };
 
 function resolveTaskId(tasks: Task[], partial: string): ResolveResult {
+  if (partial.trim() === "") {
+    error("Task ID cannot be empty");
+    return { ok: false, code: EXIT_VALIDATION };
+  }
   const matches = tasks.filter((t) => t.id.startsWith(partial));
   if (matches.length === 1) return { ok: true, task: matches[0]! };
   if (matches.length === 0) {
@@ -263,7 +296,7 @@ async function cmdAdd(args: string[]): Promise<number> {
   const description = getFlag(args, "--desc") ?? "";
 
   // Subtask support
-  const subtaskOfId = getFlag(args, "--subtask-of");
+  const subtaskOfFlag = readFlag(args, "--subtask-of");
 
   // Recurrence
   const recurVal = getFlag(args, "--recur");
@@ -292,8 +325,13 @@ async function cmdAdd(args: string[]): Promise<number> {
 
   // Resolve parent if subtask
   let parentId: string | null = null;
-  if (subtaskOfId) {
-    const result = resolveTaskId(store.tasks, subtaskOfId);
+  if (subtaskOfFlag.state === "value") {
+    const partial = subtaskOfFlag.value.trim();
+    if (partial === "") {
+      error("Task ID cannot be empty");
+      return EXIT_VALIDATION;
+    }
+    const result = resolveTaskId(store.tasks, partial);
     if (!result.ok) return result.code;
     parentId = result.task.id;
   }
@@ -1053,6 +1091,12 @@ export async function runCLI(args: string[]): Promise<number> {
   // Global flags
   const noColor = hasFlag(args, "--no-color") || !!process.env.NO_COLOR;
   setColorEnabled(!noColor);
+
+  const missingFlag = findFirstMissingFlagValue(args);
+  if (missingFlag) {
+    error(`Missing value for ${missingFlag}`);
+    return EXIT_VALIDATION;
+  }
 
   if (hasFlag(args, "--version", "-v")) {
     console.log("tsk v0.2.0");

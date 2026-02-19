@@ -1,4 +1,4 @@
-import { useState, useMemo } from "react";
+import { useMemo, useState, useSyncExternalStore } from "react";
 import { useKeyboard } from "@opentui/react";
 import type { Task } from "../store/types.ts";
 import type { TaskStore } from "../store/task-store.ts";
@@ -29,6 +29,28 @@ interface CalendarViewProps {
   isModalOpen: boolean;
 }
 
+export function buildDayTaskMap(
+  tasks: Task[],
+  viewYear: number,
+  viewMonth: number,
+  daysInMonth: number,
+): Map<number, Task[]> {
+  const map = new Map<number, Task[]>();
+  const monthPrefix = `${viewYear}-${String(viewMonth + 1).padStart(2, "0")}-`;
+  for (const task of tasks) {
+    if (!task.dueDate || !task.dueDate.startsWith(monthPrefix)) continue;
+    const day = Number(task.dueDate.slice(8, 10));
+    if (!Number.isInteger(day) || day < 1 || day > daysInMonth) continue;
+    const bucket = map.get(day);
+    if (bucket) {
+      bucket.push(task);
+    } else {
+      map.set(day, [task]);
+    }
+  }
+  return map;
+}
+
 export function CalendarView({ store, pushModal, isModalOpen }: CalendarViewProps) {
   const now = new Date();
   const [viewYear, setViewYear] = useState(now.getFullYear());
@@ -37,17 +59,12 @@ export function CalendarView({ store, pushModal, isModalOpen }: CalendarViewProp
 
   const daysInMonth = getDaysInMonth(viewYear, viewMonth);
   const firstWeekday = getFirstWeekdayOfMonth(viewYear, viewMonth);
+  const snapshot = useSyncExternalStore(store.subscribe, store.getSnapshot);
 
   // Build task map: day → tasks
   const dayTaskMap = useMemo(() => {
-    const map = new Map<number, Task[]>();
-    for (let d = 1; d <= daysInMonth; d++) {
-      const iso = toISODate(viewYear, viewMonth, d);
-      const tasks = store.getByDate(iso);
-      if (tasks.length > 0) map.set(d, tasks);
-    }
-    return map;
-  }, [store, viewYear, viewMonth, daysInMonth]);
+    return buildDayTaskMap(snapshot, viewYear, viewMonth, daysInMonth);
+  }, [daysInMonth, snapshot, viewMonth, viewYear]);
 
   const isToday = (day: number) =>
     viewYear === now.getFullYear() && viewMonth === now.getMonth() && day === now.getDate();

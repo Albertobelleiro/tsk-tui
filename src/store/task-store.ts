@@ -1,13 +1,15 @@
-import { mkdir } from "node:fs/promises";
+import { chmod, mkdir, rename, rm } from "node:fs/promises";
 import { homedir } from "node:os";
 import { join } from "node:path";
 import type {
   Task, TaskStatus, TaskPriority, FilterState,
   TaskNote, RecurrenceRule, TaskTreeNode, UndoEntry,
 } from "./types.ts";
+import { parsePersistedTasks } from "./schema.ts";
 
-const DATA_DIR = join(homedir(), ".tsk");
-const DATA_FILE = join(DATA_DIR, "tasks.json");
+const DEFAULT_DATA_DIR = join(homedir(), ".tsk");
+const SAVE_DEBOUNCE_MS = 300;
+const SAVE_RETRY_MAX_MS = 30_000;
 
 const PRIORITY_WEIGHT: Record<TaskPriority, number> = {
   none: 0,
@@ -22,19 +24,31 @@ const MAX_UNDO = 50;
 export class TaskStore {
   tasks: Task[] = [];
 
+  private readonly _dataDir: string;
+  private readonly _dataFile: string;
   private _undoStack: UndoEntry[] = [];
   private _redoStack: UndoEntry[] = [];
   private _saveTimer: ReturnType<typeof setTimeout> | null = null;
+  private _retryTimer: ReturnType<typeof setTimeout> | null = null;
   private _listeners = new Set<() => void>();
+  private _saveInFlight = false;
+  private _savePromise: Promise<void> | null = null;
+  private _saveQueued = false;
+  private _nextRetryDelayMs = 0;
+  private _persistenceError: string | null = null;
 
   // v0.2 — Active timer state (not persisted)
   activeTimerTaskId: string | null = null;
   activeTimerStart: number | null = null;
 
-  private constructor() {}
+  private constructor(dataDir: string) {
+    this._dataDir = dataDir;
+    this._dataFile = join(dataDir, "tasks.json");
+  }
 
-  static async create(): Promise<TaskStore> {
-    const store = new TaskStore();
+  static async create(options?: { dataDir?: string }): Promise<TaskStore> {
+    const dataDir = options?.dataDir ?? process.env.TSK_DATA_DIR ?? DEFAULT_DATA_DIR;
+    const store = new TaskStore(dataDir);
     await store.load();
     return store;
   }
@@ -558,7 +572,9 @@ export class TaskStore {
       } else if (ad) return -1;
       else if (bd) return 1;
 
-      return a.createdAt < b.createdAt ? -1 : a.createdAt > b.createdAt ? 1 : 0;
+      if (a.createdAt < b.createdAt) return -1;
+      if (a.createdAt > b.createdAt) return 1;
+      return a.id.localeCompare(b.id);
     });
 
     return result;
@@ -630,32 +646,47 @@ export class TaskStore {
   // ── Persistence ───────────────────────────────────────
 
   async save(): Promise<void> {
-    await mkdir(DATA_DIR, { recursive: true });
-    await Bun.write(DATA_FILE, JSON.stringify(this.tasks, null, 2));
+    if (this._saveTimer) {
+      clearTimeout(this._saveTimer);
+      this._saveTimer = null;
+    }
+    if (this._retryTimer) {
+      clearTimeout(this._retryTimer);
+      this._retryTimer = null;
+    }
+    this._saveQueued = true;
+    await this._drainSaveQueue({ throwOnFailure: true });
+    if (this._persistenceError) {
+      throw new Error(this._persistenceError);
+    }
   }
 
   async load(): Promise<void> {
-    await mkdir(DATA_DIR, { recursive: true });
-    const file = Bun.file(DATA_FILE);
+    await mkdir(this._dataDir, { recursive: true });
+    const file = Bun.file(this._dataFile);
     if (!(await file.exists())) {
       this.tasks = [];
-      await this.save();
+      await this._writeAtomic(this.tasks);
+      this._setPersistenceError(null);
       return;
     }
     try {
       const text = await file.text();
       const parsed: unknown = JSON.parse(text);
-      if (!Array.isArray(parsed)) throw new Error("Expected array");
-      // Migrate v0.1 tasks to v0.2
-      this.tasks = (parsed as Record<string, unknown>[]).map(migrateTask);
+      this.tasks = parsePersistedTasks(parsed);
+      this._setPersistenceError(null);
     } catch {
-      console.error("[tsk] Corrupted tasks.json — backing up and starting fresh.");
+      console.error("[tsk] Invalid tasks.json — backing up and starting fresh.");
+      const backupTs = new Date().toISOString().replace(/[:.]/g, "-");
+      const backupFile = `${this._dataFile}.invalid.${backupTs}.bak`;
       try {
-        const raw = await Bun.file(DATA_FILE).arrayBuffer();
-        await Bun.write(DATA_FILE + ".bak", raw);
+        const raw = await Bun.file(this._dataFile).arrayBuffer();
+        await Bun.write(backupFile, raw);
+        await chmod(backupFile, 0o600);
       } catch { /* backup failed, continue anyway */ }
       this.tasks = [];
-      await this.save();
+      await this._writeAtomic(this.tasks);
+      this._setPersistenceError(null);
     }
   }
 
@@ -699,6 +730,35 @@ export class TaskStore {
     return this._undoStack;
   }
 
+  get persistenceError(): string | null {
+    return this._persistenceError;
+  }
+
+  get hasPendingSave(): boolean {
+    return (
+      this._saveQueued ||
+      this._saveInFlight ||
+      this._saveTimer !== null ||
+      this._retryTimer !== null
+    );
+  }
+
+  async flushPendingSave(): Promise<void> {
+    if (this._saveTimer) {
+      clearTimeout(this._saveTimer);
+      this._saveTimer = null;
+    }
+    if (this._retryTimer) {
+      clearTimeout(this._retryTimer);
+      this._retryTimer = null;
+    }
+    this._saveQueued = true;
+    await this._drainSaveQueue({ throwOnFailure: true });
+    if (this._persistenceError) {
+      throw new Error(this._persistenceError);
+    }
+  }
+
   // ── Subscription (useSyncExternalStore) ───────────────
 
   subscribe = (listener: () => void): (() => void) => {
@@ -729,10 +789,105 @@ export class TaskStore {
   }
 
   private _scheduleSave(): void {
+    this._saveQueued = true;
+    if (this._retryTimer) {
+      clearTimeout(this._retryTimer);
+      this._retryTimer = null;
+    }
     if (this._saveTimer) clearTimeout(this._saveTimer);
     this._saveTimer = setTimeout(() => {
-      this.save().catch((e) => console.error("[tsk] Save failed:", e));
-    }, 300);
+      this._saveTimer = null;
+      void this._drainSaveQueue();
+    }, SAVE_DEBOUNCE_MS);
+    this._notify();
+  }
+
+  private _setPersistenceError(message: string | null): void {
+    if (this._persistenceError !== message) {
+      this._persistenceError = message;
+      this._notify();
+    }
+  }
+
+  private _nextRetryDelay(): number {
+    if (this._nextRetryDelayMs === 0) {
+      this._nextRetryDelayMs = 1_000;
+      return this._nextRetryDelayMs;
+    }
+    if (this._nextRetryDelayMs === 1_000) {
+      this._nextRetryDelayMs = 2_000;
+      return this._nextRetryDelayMs;
+    }
+    if (this._nextRetryDelayMs === 2_000) {
+      this._nextRetryDelayMs = 5_000;
+      return this._nextRetryDelayMs;
+    }
+    this._nextRetryDelayMs = Math.min(this._nextRetryDelayMs * 2, SAVE_RETRY_MAX_MS);
+    return this._nextRetryDelayMs;
+  }
+
+  private _queueRetry(): void {
+    if (this._retryTimer) {
+      clearTimeout(this._retryTimer);
+    }
+    const delay = this._nextRetryDelay();
+    this._retryTimer = setTimeout(() => {
+      this._retryTimer = null;
+      void this._drainSaveQueue();
+    }, delay);
+  }
+
+  private async _drainSaveQueue(options?: { throwOnFailure?: boolean }): Promise<void> {
+    if (this._saveInFlight) {
+      await this._savePromise;
+      return;
+    }
+
+    this._saveInFlight = true;
+    const throwOnFailure = options?.throwOnFailure ?? false;
+    this._savePromise = (async () => {
+      while (this._saveQueued) {
+        this._saveQueued = false;
+        try {
+          await this._writeAtomic(this.tasks);
+          this._nextRetryDelayMs = 0;
+          this._setPersistenceError(null);
+        } catch (error) {
+          const message = error instanceof Error ? error.message : String(error);
+          this._setPersistenceError(message);
+          this._saveQueued = true;
+          this._queueRetry();
+          if (throwOnFailure) {
+            throw error;
+          }
+          break;
+        }
+      }
+    })();
+
+    try {
+      await this._savePromise;
+    } finally {
+      this._saveInFlight = false;
+      this._savePromise = null;
+      this._notify();
+    }
+  }
+
+  private async _writeAtomic(tasks: Task[]): Promise<void> {
+    await mkdir(this._dataDir, { recursive: true });
+    const payload = JSON.stringify(tasks, null, 2);
+    const suffix = `${Date.now()}-${Math.random().toString(16).slice(2)}`;
+    const tmpPath = `${this._dataFile}.tmp-${suffix}`;
+    await Bun.write(tmpPath, payload);
+    try {
+      await chmod(tmpPath, 0o600);
+      await rename(tmpPath, this._dataFile);
+      await chmod(this._dataFile, 0o600);
+    } catch (error) {
+      await rm(tmpPath, { force: true }).catch(() => undefined);
+      throw error;
+    }
   }
 
   private _collectSubtreeIds(id: string): Set<string> {
@@ -792,33 +947,4 @@ export class TaskStore {
     const d = String(base.getDate()).padStart(2, "0");
     return `${base.getFullYear()}-${m}-${d}`;
   }
-}
-
-// ── Migration: v0.1 → v0.2 ──────────────────────────
-
-function migrateTask(raw: Record<string, unknown>): Task {
-  return {
-    id: (raw.id as string) ?? crypto.randomUUID(),
-    title: (raw.title as string) ?? "",
-    description: (raw.description as string) ?? "",
-    status: (raw.status as TaskStatus) ?? "todo",
-    priority: (raw.priority as TaskPriority) ?? "none",
-    project: (raw.project as string | null) ?? null,
-    tags: (raw.tags as string[]) ?? [],
-    dueDate: (raw.dueDate as string | null) ?? null,
-    createdAt: (raw.createdAt as string) ?? new Date().toISOString(),
-    updatedAt: (raw.updatedAt as string) ?? new Date().toISOString(),
-    completedAt: (raw.completedAt as string | null) ?? null,
-    order: (raw.order as number) ?? 0,
-    // v0.2 fields with defaults
-    parentId: (raw.parentId as string | null) ?? null,
-    subtaskIds: (raw.subtaskIds as string[]) ?? [],
-    blockedBy: (raw.blockedBy as string[]) ?? [],
-    recurrence: (raw.recurrence as RecurrenceRule | null) ?? null,
-    estimateMinutes: (raw.estimateMinutes as number | null) ?? null,
-    actualMinutes: (raw.actualMinutes as number | null) ?? null,
-    notes: (raw.notes as TaskNote[]) ?? [],
-    externalId: (raw.externalId as string | null) ?? null,
-    externalSource: (raw.externalSource as Task["externalSource"]) ?? null,
-  };
 }

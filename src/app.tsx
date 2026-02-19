@@ -53,6 +53,13 @@ const SORT_DISPLAY: Record<string, string> = {
   order: "order",
 };
 
+export function shouldBlockGlobalShortcuts(
+  isModalOpen: boolean,
+  isViewCapturingInput: boolean,
+): boolean {
+  return isModalOpen || isViewCapturingInput;
+}
+
 export function App({ store }: AppProps) {
   const renderer = useRenderer();
   const { height } = useTerminalDimensions();
@@ -61,6 +68,7 @@ export function App({ store }: AppProps) {
   const [filter, setFilter] = useState<FilterState>({ ...DEFAULT_FILTER });
   const [statusMessage, setStatusMessage] = useState<string | null>(null);
   const [visualCount, setVisualCount] = useState(0);
+  const [isViewCapturingInput, setIsViewCapturingInput] = useState(false);
   const [, setTick] = useState(0); // For timer updates
 
   const _snapshot = useSyncExternalStore(store.subscribe, store.getSnapshot);
@@ -95,8 +103,9 @@ export function App({ store }: AppProps) {
   useKeyboard((e) => {
     // Ctrl+S force save
     if (e.name === "s" && e.ctrl) {
-      store.save();
-      showToast("Saved!", "success");
+      void store.save()
+        .then(() => showToast("Saved!", "success"))
+        .catch((err) => showToast(`Save failed: ${String(err)}`, "error"));
       return;
     }
     // Ctrl+T cycle theme
@@ -105,7 +114,7 @@ export function App({ store }: AppProps) {
       showToast(`Theme: ${next}`, "info");
       return;
     }
-    if (isModalOpen) return;
+    if (shouldBlockGlobalShortcuts(isModalOpen, isViewCapturingInput)) return;
     switch (e.name) {
       case "1": setActiveView("list"); break;
       case "2": setActiveView("board"); break;
@@ -177,6 +186,7 @@ export function App({ store }: AppProps) {
           filter={filter}
           onFilterChange={handleFilterChange}
           onVisualCountChange={setVisualCount}
+          onInputCaptureChange={setIsViewCapturingInput}
         />
       ) : activeView === "board" ? (
         <ProjectView
@@ -206,6 +216,8 @@ export function App({ store }: AppProps) {
           redoCount={store.redoCount}
           timerText={timerText}
           visualCount={visualCount}
+          persistenceError={store.persistenceError}
+          hasPendingSave={store.hasPendingSave}
         />
       )}
 

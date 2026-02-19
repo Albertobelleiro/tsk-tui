@@ -37,6 +37,14 @@ const SORT_DEFAULTS: Record<SortField, "asc" | "desc"> = {
   order: "asc",
 };
 
+export function shouldCaptureInput(searchOpen: boolean, inlineAdd: boolean): boolean {
+  return searchOpen || inlineAdd;
+}
+
+export function shouldNotifyUnblocked(wasDone: boolean, hasRecurrence: boolean): boolean {
+  return !wasDone && !hasRecurrence;
+}
+
 interface TaskListViewProps {
   store: TaskStore;
   tasks: Task[];
@@ -46,6 +54,7 @@ interface TaskListViewProps {
   filter: FilterState;
   onFilterChange: (update: Partial<FilterState>) => void;
   onVisualCountChange?: (count: number) => void;
+  onInputCaptureChange?: (capturing: boolean) => void;
 }
 
 export function TaskListView({
@@ -57,6 +66,7 @@ export function TaskListView({
   filter,
   onFilterChange,
   onVisualCountChange,
+  onInputCaptureChange,
 }: TaskListViewProps) {
   const [selectedIndex, setSelectedIndex] = useState(0);
   const [focusPanel, setFocusPanel] = useState<"list" | "detail">("list");
@@ -88,6 +98,10 @@ export function TaskListView({
   useEffect(() => {
     onVisualCountChange?.(visualMode ? visualSet.size : 0);
   }, [visualMode, visualSet.size, onVisualCountChange]);
+
+  useEffect(() => {
+    onInputCaptureChange?.(shouldCaptureInput(searchOpen, inlineAdd));
+  }, [inlineAdd, onInputCaptureChange, searchOpen]);
 
   const exitVisualMode = useCallback(() => {
     setVisualMode(false);
@@ -276,9 +290,10 @@ export function TaskListView({
           const next = store.completeRecurring(selectedTask.id);
           if (next) showToast(`Next: ${next.dueDate}`, "info");
         } else {
+          const wasDone = selectedTask.status === "done";
           store.toggleDone(selectedTask.id);
           // Check unblocked tasks
-          if (selectedTask.status !== "done") {
+          if (shouldNotifyUnblocked(wasDone, selectedTask.recurrence !== null)) {
             const unblocked = store.getUnblockedTasks(selectedTask.id);
             for (const uid of unblocked) {
               const ut = store.tasks.find((t) => t.id === uid);
