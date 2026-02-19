@@ -1,26 +1,27 @@
-# tsk -- Terminal Task Manager
+# tsk
 
-> A keyboard-driven, visually polished task manager that runs entirely in your terminal. Built with OpenTUI and Bun.
+A fast, keyboard-driven task manager for the terminal. No browser, no Electron, no mouse required.
 
-## Features
+![tsk — Task List view with detail panel](Screenshot%202026-02-19%20at%2012.34.37.png)
 
-- Keyboard-driven with Vim-style navigation (j/k, h/l)
-- 4 views: Task List, Project Board (kanban), Calendar, Help
-- Real-time search, filter by status, and sort cycling
-- Full CLI interface for scripting and automation
-- Local JSON persistence (`~/.tsk/tasks.json`)
-- Tokyo Night color theme
-- Compiled single-binary distribution (no runtime dependencies)
+## Why tsk
 
-## Installation
+- **Instant.** Launches in under 100ms. CLI commands finish before your shell prompt redraws.
+- **Keyboard-only.** Vim-style navigation everywhere. One key to add, edit, complete, or delete.
+- **Three views.** Task list with detail panel, kanban project board, and monthly calendar.
+- **CLI + TUI.** `tsk add "Buy milk" -p high` from scripts, `tsk` for the full interactive UI.
+- **Local-first.** All data lives in `~/.tsk/tasks.json`. No accounts, no sync, no cloud.
+- **Single binary.** Compiles to a standalone executable via `bun build --compile`.
 
-### Quick install (macOS / Linux)
+## Install
+
+### Binary (macOS / Linux)
 
 ```bash
 curl -fsSL https://raw.githubusercontent.com/Albertobelleiro/tsk-tui/main/install.sh | sh
 ```
 
-### From source (requires Bun >= 1.2)
+### From source
 
 ```bash
 git clone https://github.com/Albertobelleiro/tsk-tui.git
@@ -29,45 +30,58 @@ bun install
 bun run start
 ```
 
-## Usage
+Requires [Bun](https://bun.sh) >= 1.2.
 
-### TUI mode
+## Quick start
 
 ```bash
-tsk                 # Open interactive terminal UI
+tsk                          # Launch the TUI
+tsk add "Fix login bug" -p urgent -P backend --tag auth --due 2026-03-01
+tsk list                     # Formatted table
+tsk list --json              # Machine-readable output
+tsk done a1b2                # Partial ID match — no need to type the full UUID
+tsk search "login"           # Fuzzy search across title + description
 ```
 
-### CLI commands
+## CLI reference
 
-```bash
-tsk add "Buy milk" -p high --tag groceries --due 2026-03-01
-tsk list --status todo --sort priority
-tsk list --json | jq '.[].title'
-tsk show a1b2
-tsk edit a1b2 --priority urgent --project dev
-tsk done a1b2
-tsk start a1b2
-tsk archive a1b2
-tsk rm a1b2 --force
-tsk search "login"
-tsk projects
-tsk tags
+```
+tsk                          Open interactive TUI
+tsk add <title> [flags]      Add a new task
+tsk list [flags]             List tasks
+tsk show <id>                Show task details
+tsk edit <id> [flags]        Update a task
+tsk done <id>                Toggle done/todo
+tsk start <id>               Set task to in-progress
+tsk archive <id>             Archive a task
+tsk rm <id> [--force]        Delete a task
+tsk search <query>           Search tasks
+tsk projects                 List projects with task counts
+tsk tags                     List tags with task counts
 ```
 
-### Bulk operations
+### Flags
+
+**`tsk add`**: `-p` priority (none/low/medium/high/urgent), `-P` project, `-t` tags (comma-separated), `-d` due date (YYYY-MM-DD), `--desc` description.
+
+**`tsk list`**: `--status` (todo/in_progress/done/archived), `--priority`, `--project`, `--tag`, `--due` (today/overdue/week/YYYY-MM-DD), `--sort` (priority/due/created/title), `--json`.
+
+**`tsk edit`**: `--title`, `--desc`, `--priority`, `--project`, `--tag`, `--due`, `--status`.
+
+**Bulk operations:**
 
 ```bash
-tsk done --all --project dev         # Mark all dev tasks as done
-tsk rm --all --status archived       # Remove all archived tasks
+tsk done --all --project dev         # Complete all tasks in a project
+tsk rm --all --status archived       # Clean up archived tasks
 ```
 
 ### Partial ID matching
 
-Task IDs are UUIDs, but you only need to type enough characters to be unique:
+Task IDs are UUIDs. You only need enough characters for a unique prefix:
 
 ```bash
 tsk show a1       # Matches a1b2c3d4-...
-tsk done a1b2     # Works with any unique prefix
+tsk done c08      # Any unique prefix works
 ```
 
 ### Exit codes
@@ -75,10 +89,10 @@ tsk done a1b2     # Works with any unique prefix
 | Code | Meaning |
 |------|---------|
 | 0 | Success |
-| 1 | General error (unknown command, I/O error) |
+| 1 | General error |
 | 2 | Task not found |
-| 3 | Ambiguous ID (prefix matches multiple tasks) |
-| 4 | Validation error (missing title, bad date, etc.) |
+| 3 | Ambiguous ID |
+| 4 | Validation error |
 
 ## Keyboard shortcuts
 
@@ -86,54 +100,51 @@ tsk done a1b2     # Works with any unique prefix
 
 | Key | Action |
 |-----|--------|
-| `j` / Down | Move down |
-| `k` / Up | Move up |
-| `g` | Go to top |
-| `G` | Go to bottom |
-| `J` / `K` | Jump 10 up/down |
+| `j` / `k` | Move down / up |
+| `g` / `G` | Jump to top / bottom |
+| `J` / `K` | Jump 10 items |
 | `Tab` | Switch panel focus |
-| `Enter` | Open / Select |
 | `Esc` | Back / Close |
-
-### Views
-
-| Key | Action |
-|-----|--------|
-| `1` | Task List view |
-| `2` | Project Board view |
-| `3` | Calendar view |
-| `?` | Help overlay |
 
 ### Actions
 
 | Key | Action |
 |-----|--------|
-| `a` | Add new task |
+| `a` | Add task |
 | `e` | Edit task |
-| `d` | Mark done / undone |
+| `d` | Toggle done |
 | `x` | Delete task |
 | `/` | Search |
 | `!` | Set priority |
 | `p` | Set project |
-| `t` | Add/remove tag |
+| `t` | Manage tags |
 | `D` | Set due date |
 | `s` | Cycle sort |
 | `f` | Cycle status filter |
 | `u` | Undo |
 
-### Board view
+### Views
+
+| Key | Action |
+|-----|--------|
+| `1` | Task List |
+| `2` | Project Board (kanban) |
+| `3` | Calendar |
+| `?` | Help overlay |
+
+### Board view specific
 
 | Key | Action |
 |-----|--------|
 | `h` / `l` | Switch column |
-| `H` / `L` | Move task left/right |
+| `H` / `L` | Move task between columns |
 
-### Calendar view
+### Calendar view specific
 
 | Key | Action |
 |-----|--------|
 | `h/j/k/l` | Navigate days |
-| `H` / `L` | Previous/Next month |
+| `H` / `L` | Previous / Next month |
 | `t` | Jump to today |
 
 ### General
@@ -148,21 +159,32 @@ tsk done a1b2     # Works with any unique prefix
 
 ```bash
 bun install          # Install dependencies
-bun run dev          # Watch mode with hot reload
-bun run start        # Run directly
-bun run typecheck    # TypeScript type checking
-bun run build        # Compile binary for current platform
-bun run build:all    # Compile for all platforms (macOS + Linux, arm64 + x64)
+bun run dev          # Watch mode
+bun run typecheck    # Type check
+bun run build        # Compile binary (current platform)
+bun run build:all    # Cross-compile (macOS + Linux, arm64 + x64)
 ```
 
-The compiled binary is output to `./dist/tsk`.
+Output binary: `./dist/tsk`
+
+## Architecture
+
+```
+bin/tsk.tsx          CLI router — subcommands run headless, no args launches TUI
+src/cli/             Headless CLI (format.ts, index.ts)
+src/store/           TaskStore — in-memory + JSON persistence with debounced save
+src/views/           Task list, project board, calendar, help overlay
+src/components/      Reusable UI — modal, task row, status bar, header
+src/theme/           Tokyo Night color palette
+src/utils/           Date formatting and due-date helpers
+```
 
 ## Tech stack
 
-- **Runtime:** Bun
-- **UI framework:** @opentui/react
-- **Language:** TypeScript (strict mode)
-- **Storage:** Local JSON file (`~/.tsk/tasks.json`)
+- **Runtime:** [Bun](https://bun.sh)
+- **TUI framework:** [@opentui/react](https://opentui.dev)
+- **Language:** TypeScript (strict)
+- **Storage:** `~/.tsk/tasks.json`
 
 ## License
 
