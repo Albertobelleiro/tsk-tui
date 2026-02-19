@@ -82,9 +82,12 @@ export function HelpView({ onClose }: HelpViewProps) {
 
               <Section title="SUBTASKS" />
               <box height={1} />
-              <Binding keys="A" desc="Add subtask" />
-              <Binding keys="Shift+→" desc="Indent (subtask)" />
+              <Binding keys="A" desc="Add subtask under selected" />
+              <Binding keys="a" desc="Add sibling task" />
+              <Binding keys="Shift+→" desc="Indent (make subtask)" />
               <Binding keys="Shift+←" desc="Promote (top-level)" />
+              <Binding keys="Enter/→" desc="Expand/collapse subtasks" />
+              <Binding keys="←" desc="Jump to parent task" />
             </box>
 
             {/* Right column */}

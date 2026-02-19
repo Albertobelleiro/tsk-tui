@@ -1,4 +1,4 @@
-import { useState, useCallback, useEffect, useSyncExternalStore } from "react";
+import { useState, useCallback, useEffect, useRef, useSyncExternalStore } from "react";
 import { useKeyboard, useRenderer, useTerminalDimensions } from "@opentui/react";
 import type { TaskStore } from "./store/task-store.ts";
 import type { Task, TaskPriority, FilterState } from "./store/types.ts";
@@ -15,6 +15,8 @@ import { HelpView } from "./views/help-view.tsx";
 import { InputModal } from "./components/input-modal.tsx";
 import { ConfirmModal } from "./components/confirm-modal.tsx";
 import { SelectModal } from "./components/select-modal.tsx";
+import { AgentBridge } from "./integrations/agent-bridge.ts";
+import { loadConfig } from "./config/config.ts";
 
 type ModalType =
   | { type: "add" }
@@ -85,6 +87,34 @@ export function App({ store }: AppProps) {
   const timerText = store.activeTimerTaskId && store.activeTimerStart
     ? formatTimer(Date.now() - store.activeTimerStart)
     : null;
+
+  // Agent bridge auto-start/stop
+  const [agentActive, setAgentActive] = useState(false);
+  const bridgeRef = useRef<AgentBridge | null>(null);
+
+  useEffect(() => {
+    let cancelled = false;
+    (async () => {
+      try {
+        const config = await loadConfig();
+        if (cancelled || !config.integrations.agent?.enabled) return;
+        const bridge = new AgentBridge(store, config.integrations.agent);
+        bridge.onEvent((evt) => {
+          showToast(`Agent: ${evt.summary}`, evt.status === "ok" ? "info" : "error");
+        });
+        await bridge.start();
+        if (cancelled) { bridge.stop(); return; }
+        bridgeRef.current = bridge;
+        setAgentActive(true);
+      } catch { /* agent bridge is optional */ }
+    })();
+    return () => {
+      cancelled = true;
+      bridgeRef.current?.stop();
+      bridgeRef.current = null;
+      setAgentActive(false);
+    };
+  }, [store]);
 
   const pushModal = useCallback((modal: ModalType) => {
     setModalStack((s) => [...s, modal]);
@@ -174,6 +204,7 @@ export function App({ store }: AppProps) {
         activeView={activeView}
         onViewChange={setActiveView}
         timerActive={store.activeTimerTaskId !== null}
+        agentActive={agentActive}
       />
 
       {activeView === "list" ? (

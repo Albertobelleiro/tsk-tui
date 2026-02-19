@@ -15,12 +15,14 @@ import {
 import { SyncEngine, providerKeyToSource } from "../integrations/sync-engine.ts";
 import { SyncStateManager } from "../integrations/sync-state.ts";
 import { TodoistProvider } from "../integrations/todoist.ts";
-import { LinearProvider } from "../integrations/linear.ts";
-import { AsanaProvider } from "../integrations/asana.ts";
+import { LinearProvider, linearVerifyToken, linearFetchTeams, linearBuildStateMapping } from "../integrations/linear.ts";
+import { AsanaProvider, ensureValidToken } from "../integrations/asana.ts";
 import { GitHubIssuesProvider } from "../integrations/github-issues.ts";
 import { runOAuthFlow } from "../integrations/oauth-helpers.ts";
 import { runDeviceFlow } from "../integrations/oauth-device-flow.ts";
 import type { SyncProvider } from "../integrations/types.ts";
+import { AgentBridge } from "../integrations/agent-bridge.ts";
+import type { AgentCommand } from "../integrations/agent-protocol.ts";
 import {
   setColorEnabled, bold, dim, cyan, green, red,
   formatTaskTable, formatTaskDetail, success, error,
@@ -251,6 +253,7 @@ Usage:
   tsk disconnect <provider>    Disconnect provider
   tsk sync [provider]          Sync integrations
   tsk export [--format json|csv|markdown]
+  tsk agent <start|stop|status|send|outbox|clear|snippet>
 
 Flags:
   -h, --help                   Show this help
@@ -1009,12 +1012,13 @@ async function createProviderForKey(provider: ConnectProvider, config: Awaited<R
     case "linear": {
       const cfg = config.integrations.linear;
       if (!cfg?.accessToken) return null;
-      return new LinearProvider(cfg.accessToken, cfg.teamId);
+      return new LinearProvider(cfg.accessToken, cfg.teamId, cfg.stateMapping);
     }
     case "asana": {
       const cfg = config.integrations.asana;
       if (!cfg?.accessToken) return null;
-      return new AsanaProvider(cfg.accessToken, cfg.workspaceId, cfg.projectId);
+      const token = await ensureValidToken(cfg);
+      return new AsanaProvider(token, cfg.workspaceId, cfg.projectId);
     }
     case "github": {
       const cfg = config.integrations.github;
@@ -1078,7 +1082,7 @@ async function cmdConnect(args: string[]): Promise<number> {
             clientId: cid,
             clientSecret: secret,
             scopes: ["data:read_write"],
-            usePkce: true,
+            usePkce: false, // Todoist does not support PKCE; client_secret required
           });
           accessToken = oauth.accessToken;
           refreshToken = oauth.refreshToken;
@@ -1093,6 +1097,9 @@ async function cmdConnect(args: string[]): Promise<number> {
       }
       case "linear": {
         let accessToken = tokenFlag ?? apiKeyFlag ?? "";
+        let refreshToken: string | undefined;
+        const isApiKey = !!apiKeyFlag;
+
         if (!accessToken) {
           const cid = clientId ?? process.env.TSK_LINEAR_CLIENT_ID;
           const secret = clientSecret ?? process.env.TSK_LINEAR_CLIENT_SECRET;
@@ -1105,16 +1112,73 @@ async function cmdConnect(args: string[]): Promise<number> {
             tokenUrl: "https://api.linear.app/oauth/token",
             clientId: cid,
             clientSecret: secret,
-            scopes: ["read", "write"],
+            scopes: [], // Linear uses comma-separated scopes; set via extraAuthorizeParams
             usePkce: true,
+            extraAuthorizeParams: { scope: "read,write,issues:create" },
           });
-          accessToken = oauth.accessToken;
+          accessToken = `Bearer ${oauth.accessToken}`;
+          refreshToken = oauth.refreshToken;
+        } else if (!isApiKey) {
+          // Token flag from OAuth — prefix Bearer if not already
+          if (!accessToken.startsWith("Bearer ") && !accessToken.startsWith("lin_")) {
+            accessToken = `Bearer ${accessToken}`;
+          }
+        }
+
+        // Verify token works
+        const viewer = await linearVerifyToken(accessToken);
+        if (!viewer) {
+          error("Failed to verify Linear token — check credentials");
+          return EXIT_ERROR;
+        }
+        console.log(dim(`  Authenticated as ${viewer.name} (${viewer.email})`));
+
+        // Resolve team
+        let teamId = getFlag(args, "--team");
+        let teamName: string | undefined;
+
+        if (!teamId) {
+          const teams = await linearFetchTeams(accessToken);
+          if (teams.length === 0) {
+            error("No teams found in your Linear workspace");
+            return EXIT_ERROR;
+          }
+          if (teams.length === 1) {
+            teamId = teams[0]!.id;
+            teamName = teams[0]!.name;
+            console.log(dim(`  Auto-selected team: ${teamName} (${teams[0]!.key})`));
+          } else {
+            console.log("\n  Select a team:");
+            for (let i = 0; i < teams.length; i++) {
+              console.log(`    ${i + 1}. ${teams[i]!.name} (${teams[i]!.key})`);
+            }
+            process.stdout.write(`\n  Enter number [1-${teams.length}]: `);
+            const answer = await readLine();
+            const idx = parseInt(answer) - 1;
+            if (isNaN(idx) || idx < 0 || idx >= teams.length) {
+              error("Invalid selection");
+              return EXIT_VALIDATION;
+            }
+            teamId = teams[idx]!.id;
+            teamName = teams[idx]!.name;
+          }
+        }
+
+        // Build workflow state mapping
+        let stateMapping: Record<string, string> | undefined;
+        if (teamId) {
+          stateMapping = await linearBuildStateMapping(accessToken, teamId);
+          const count = Object.keys(stateMapping).length;
+          console.log(dim(`  Mapped ${count} workflow states`));
         }
 
         config.integrations.linear = {
           accessToken,
-          teamId: getFlag(args, "--team"),
+          refreshToken,
+          teamId,
+          teamName,
           projectId: getFlag(args, "--project"),
+          stateMapping,
         };
         break;
       }
@@ -1143,12 +1207,70 @@ async function cmdConnect(args: string[]): Promise<number> {
           tokenExpiresAt = oauth.expiresIn ? new Date(Date.now() + oauth.expiresIn * 1000).toISOString() : undefined;
         }
 
+        let workspaceId = getFlag(args, "--workspace");
+        let workspaceName: string | undefined;
+        let projectId = getFlag(args, "--project");
+        let projectName: string | undefined;
+
+        // Discover workspace if not specified
+        if (!workspaceId) {
+          const tmpProvider = new AsanaProvider(accessToken);
+          const workspaces = await tmpProvider.fetchWorkspaces();
+          if (workspaces.length === 0) {
+            error("No Asana workspaces found for this account");
+            return EXIT_ERROR;
+          }
+          if (workspaces.length === 1) {
+            workspaceId = workspaces[0]!.id;
+            workspaceName = workspaces[0]!.name;
+            console.log(dim(`Auto-selected workspace: ${workspaceName}`));
+          } else {
+            console.log("Available workspaces:");
+            for (let i = 0; i < workspaces.length; i++) {
+              console.log(`  ${i + 1}. ${workspaces[i]!.name} (${workspaces[i]!.id})`);
+            }
+            process.stdout.write("Select workspace [1]: ");
+            const answer = await readLine();
+            const idx = Math.max(0, (parseInt(answer.trim(), 10) || 1) - 1);
+            workspaceId = workspaces[idx]?.id ?? workspaces[0]!.id;
+            workspaceName = workspaces[idx]?.name ?? workspaces[0]!.name;
+          }
+        }
+
+        // Discover project if not specified
+        if (!projectId && workspaceId) {
+          const tmpProvider = new AsanaProvider(accessToken, workspaceId);
+          const projects = await tmpProvider.fetchProjects();
+          if (projects.length > 0) {
+            if (projects.length === 1) {
+              projectId = projects[0]!.id;
+              projectName = projects[0]!.name;
+              console.log(dim(`Auto-selected project: ${projectName}`));
+            } else {
+              console.log("Available projects:");
+              for (let i = 0; i < Math.min(projects.length, 20); i++) {
+                console.log(`  ${i + 1}. ${projects[i]!.name} (${projects[i]!.id})`);
+              }
+              if (projects.length > 20) console.log(dim(`  ... and ${projects.length - 20} more`));
+              process.stdout.write("Select project (or press Enter to skip): ");
+              const answer = await readLine();
+              const idx = parseInt(answer.trim(), 10) - 1;
+              if (idx >= 0 && idx < projects.length) {
+                projectId = projects[idx]!.id;
+                projectName = projects[idx]!.name;
+              }
+            }
+          }
+        }
+
         config.integrations.asana = {
           accessToken,
           refreshToken,
           tokenExpiresAt,
-          workspaceId: getFlag(args, "--workspace"),
-          projectId: getFlag(args, "--project"),
+          workspaceId,
+          workspaceName,
+          projectId,
+          projectName,
         };
         break;
       }
@@ -1502,6 +1624,279 @@ async function cmdBulkRm(args: string[]): Promise<number> {
   return EXIT_OK;
 }
 
+// ── Agent commands ───────────────────────────────────
+
+const HELP_AGENT = `Usage: tsk agent <subcommand>
+
+Subcommands:
+  start          Start agent bridge (foreground, Ctrl+C to stop)
+  stop           Clear agent inbox/outbox
+  status         Show bridge configuration status
+  send <json>    Send a command (writes to inbox, waits for response)
+  outbox         Show last 10 responses
+  clear          Clear the outbox
+  snippet        Print CLAUDE.md integration snippet
+
+The agent bridge allows AI coding agents to manage tasks via JSON files:
+  ~/.tsk/agent-inbox.json   — Agents write commands here
+  ~/.tsk/agent-outbox.json  — tsk writes responses here
+
+Enable auto-start: tsk config set integrations.agent.enabled true`;
+
+async function cmdAgent(args: string[]): Promise<number> {
+  if (hasFlag(args, "--help", "-h")) { console.log(HELP_AGENT); return EXIT_OK; }
+
+  const pos = positionalArgs(args);
+  const sub = pos[0];
+
+  switch (sub) {
+    case "start": return await cmdAgentStart();
+    case "stop": return cmdAgentStop();
+    case "status": return await cmdAgentStatus();
+    case "send": return await cmdAgentSend(pos.slice(1).join(" ") || "");
+    case "outbox": return await cmdAgentOutbox();
+    case "clear": return await cmdAgentClear();
+    case "snippet": return cmdAgentSnippet();
+    default:
+      error("Usage: tsk agent <start|stop|status|send|outbox|clear|snippet>");
+      return EXIT_VALIDATION;
+  }
+}
+
+async function cmdAgentStart(): Promise<number> {
+  const config = await loadConfig();
+  const agentConfig = config.integrations.agent ?? { enabled: false, pollIntervalMs: 2000 };
+  const store = await TaskStore.create();
+  const bridge = new AgentBridge(store, { enabled: true, pollIntervalMs: agentConfig.pollIntervalMs });
+
+  bridge.onEvent((evt) => {
+    const icon = evt.status === "ok" ? green("✓") : red("✗");
+    console.log(`  ${icon} ${evt.command}: ${evt.summary}`);
+  });
+
+  const pollSec = (agentConfig.pollIntervalMs / 1000).toFixed(1);
+  console.log(bold("Agent bridge listening...") + dim(` (poll: ${pollSec}s)`));
+  console.log(dim(`  Inbox:  ${AgentBridge.inboxPath}`));
+  console.log(dim(`  Outbox: ${AgentBridge.outboxPath}`));
+  console.log(dim("  Press Ctrl+C to stop.\n"));
+
+  await bridge.start();
+
+  // Block until Ctrl+C
+  await new Promise<void>((resolve) => {
+    process.on("SIGINT", () => {
+      bridge.stop();
+      console.log(dim(`\nStopped. Processed ${bridge.processedCount} commands.`));
+      resolve();
+    });
+  });
+
+  return EXIT_OK;
+}
+
+function cmdAgentStop(): number {
+  try {
+    Bun.write(AgentBridge.inboxPath, "[]");
+  } catch { /* ignore */ }
+  success("Agent inbox cleared");
+  return EXIT_OK;
+}
+
+async function cmdAgentStatus(): Promise<number> {
+  const config = await loadConfig();
+  const agentConfig = config.integrations.agent;
+  const enabled = agentConfig?.enabled ?? false;
+  const pollMs = agentConfig?.pollIntervalMs ?? 2000;
+
+  console.log("Agent Bridge:");
+  console.log(`  Enabled:        ${enabled ? green("yes") : dim("no")}`);
+  console.log(`  Poll interval:  ${dim(pollMs + "ms")}`);
+  console.log(`  Inbox:          ${dim(AgentBridge.inboxPath)}`);
+  console.log(`  Outbox:         ${dim(AgentBridge.outboxPath)}`);
+
+  const inboxFile = Bun.file(AgentBridge.inboxPath);
+  if (await inboxFile.exists()) {
+    try {
+      const text = await inboxFile.text();
+      const cmds = JSON.parse(text);
+      const count = Array.isArray(cmds) ? cmds.length : 0;
+      console.log(`  Inbox pending:  ${count > 0 ? cyan(String(count)) : dim("0")}`);
+    } catch {
+      console.log(`  Inbox pending:  ${red("(invalid JSON)")}`);
+    }
+  } else {
+    console.log(`  Inbox pending:  ${dim("(file not created)")}`);
+  }
+
+  const outboxFile = Bun.file(AgentBridge.outboxPath);
+  if (await outboxFile.exists()) {
+    try {
+      const text = await outboxFile.text();
+      const responses = JSON.parse(text);
+      const count = Array.isArray(responses) ? responses.length : 0;
+      console.log(`  Outbox entries: ${dim(String(count))}`);
+    } catch {
+      console.log(`  Outbox entries: ${red("(invalid JSON)")}`);
+    }
+  } else {
+    console.log(`  Outbox entries: ${dim("(file not created)")}`);
+  }
+
+  if (!enabled) {
+    console.log(dim("\n  Enable: tsk config set integrations.agent.enabled true"));
+  }
+
+  return EXIT_OK;
+}
+
+async function cmdAgentSend(jsonStr: string): Promise<number> {
+  if (!jsonStr.trim()) {
+    error("Usage: tsk agent send '<json>'");
+    console.error("Example: tsk agent send '{\"command\":\"list\"}'");
+    return EXIT_VALIDATION;
+  }
+
+  let parsed: Record<string, unknown>;
+  try {
+    parsed = JSON.parse(jsonStr);
+  } catch {
+    error("Invalid JSON");
+    return EXIT_VALIDATION;
+  }
+
+  // Auto-fill missing fields
+  const command: AgentCommand = {
+    id: (parsed.id as string) ?? crypto.randomUUID(),
+    timestamp: (parsed.timestamp as string) ?? new Date().toISOString(),
+    source: (parsed.source as AgentCommand["source"]) ?? "custom",
+    command: (parsed.command as AgentCommand["command"]) ?? "list",
+    payload: (parsed.payload as Record<string, unknown>) ?? {},
+  };
+
+  // Write to inbox
+  await Bun.write(AgentBridge.inboxPath, JSON.stringify([command], null, 2));
+
+  // Process immediately using a temporary bridge
+  const store = await TaskStore.create();
+  const config = await loadConfig();
+  const bridge = new AgentBridge(store, config.integrations.agent ?? { enabled: true, pollIntervalMs: 2000 });
+  const count = await bridge.processInbox();
+
+  if (count === 0) {
+    error("No commands processed");
+    return EXIT_ERROR;
+  }
+
+  // Read response from outbox
+  const outboxFile = Bun.file(AgentBridge.outboxPath);
+  if (await outboxFile.exists()) {
+    const text = await outboxFile.text();
+    try {
+      const responses = JSON.parse(text);
+      if (Array.isArray(responses)) {
+        const ours = responses.find((r: { commandId?: string }) => r.commandId === command.id);
+        if (ours) {
+          if (ours.status === "ok") {
+            success(`${command.command}: ok`);
+            if (ours.data !== undefined) {
+              console.log(JSON.stringify(ours.data, null, 2));
+            }
+          } else {
+            error(`${command.command}: ${ours.error ?? "unknown error"}`);
+            return EXIT_ERROR;
+          }
+          return EXIT_OK;
+        }
+      }
+    } catch { /* fall through */ }
+  }
+
+  error("Response not found in outbox");
+  return EXIT_ERROR;
+}
+
+async function cmdAgentOutbox(): Promise<number> {
+  const outboxFile = Bun.file(AgentBridge.outboxPath);
+  if (!(await outboxFile.exists())) {
+    console.log(dim("  Outbox is empty."));
+    return EXIT_OK;
+  }
+
+  try {
+    const text = await outboxFile.text();
+    const responses = JSON.parse(text);
+    if (!Array.isArray(responses) || responses.length === 0) {
+      console.log(dim("  Outbox is empty."));
+      return EXIT_OK;
+    }
+
+    const last10 = responses.slice(-10);
+    for (const r of last10) {
+      const icon = r.status === "ok" ? green("✓") : red("✗");
+      const ts = r.timestamp ? dim(r.timestamp.slice(11, 19)) : "";
+      const id = dim(r.commandId?.slice(0, 8) ?? "?");
+      const msg = r.status === "ok"
+        ? dim(JSON.stringify(r.data).slice(0, 60))
+        : red(r.error ?? "error");
+      console.log(`  ${icon} ${ts} ${id}  ${msg}`);
+    }
+
+    if (responses.length > 10) {
+      console.log(dim(`  ... and ${responses.length - 10} more`));
+    }
+  } catch {
+    error("Failed to parse outbox");
+    return EXIT_ERROR;
+  }
+
+  return EXIT_OK;
+}
+
+async function cmdAgentClear(): Promise<number> {
+  await Bun.write(AgentBridge.outboxPath, "[]");
+  success("Outbox cleared");
+  return EXIT_OK;
+}
+
+function cmdAgentSnippet(): number {
+  const bt = "`";
+  const fence = bt + bt + bt;
+  const lines = [
+    "## Task Management with tsk",
+    "",
+    `This project uses ${bt}tsk${bt} for task tracking. You can manage tasks via CLI or the agent bridge.`,
+    "",
+    "### CLI Commands (preferred)",
+    fence + "bash",
+    'tsk add "task title" -p high -P project-name',
+    "tsk list --json                    # See current tasks",
+    "tsk list --status todo --json      # Only pending tasks",
+    "tsk done <id>                      # Mark complete (accepts partial ID)",
+    "tsk show <id>                      # Task details",
+    fence,
+    "",
+    "### Agent Bridge (for automated workflows)",
+    `Write commands to ${bt}~/.tsk/agent-inbox.json${bt}:`,
+    fence + "json",
+    '[{"id":"<uuid>","timestamp":"<iso>","source":"claude-code","command":"create","payload":{"title":"Fix bug","priority":"high","project":"dev"}}]',
+    fence,
+    "",
+    `Read responses from ${bt}~/.tsk/agent-outbox.json${bt}.`,
+    "",
+    "Available commands: create, create-subtask, bulk-create, update, complete, uncomplete, delete, query, list, show, list-projects, list-tags, stats, add-note, start-timer, stop-timer.",
+    "",
+    "### Quick send (testing)",
+    fence + "bash",
+    `tsk agent send '{"command":"create","payload":{"title":"Fix bug","priority":"high"}}'`,
+    `tsk agent send '{"command":"list"}'`,
+    `tsk agent send '{"command":"complete","payload":{"taskId":"<partial-id>"}}'`,
+    fence,
+  ];
+
+  console.log(lines.join("\n"));
+  return EXIT_OK;
+}
+
 // ── Stdin helper ─────────────────────────────────────
 
 function readLine(): Promise<string> {
@@ -1576,6 +1971,7 @@ export async function runCLI(args: string[]): Promise<number> {
       case "disconnect": return await cmdDisconnect(handlerArgs);
       case "sync": return await cmdSync(handlerArgs);
       case "export": return await cmdExport(handlerArgs);
+      case "agent": return await cmdAgent(handlerArgs);
       default:
         error(`Unknown command: "${subcommand}"`);
         console.error("Run 'tsk --help' for usage.");

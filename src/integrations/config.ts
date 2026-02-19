@@ -25,17 +25,24 @@ export async function connectIntegration(
     case "asana":
       config.integrations.asana = {
         accessToken: options.token ?? "",
+        refreshToken: options.refreshToken,
+        tokenExpiresAt: options.tokenExpiresAt,
         workspaceId: options.workspace,
+        workspaceName: options.workspaceName,
         projectId: options.projectId,
+        projectName: options.projectName,
       };
       break;
-    case "github-issues":
+    case "github-issues": {
+      const noGh = options["no-gh"] === "true" || options.noGh === "true";
       config.integrations.github = {
         accessToken: options.token,
         repo: options.repo ?? "",
-        useGhCli: options.useGhCli === "true",
+        useGhCli: noGh ? false : (options.useGhCli !== "false"),
+        labelFilter: options.labels ? options.labels.split(",").map((l) => l.trim()) : undefined,
       };
       break;
+    }
     case "claude-code":
     case "codex":
       config.integrations.agent = {

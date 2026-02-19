@@ -9,6 +9,7 @@ export interface TodoistConfig {
 
 export interface LinearConfig {
   accessToken: string;
+  refreshToken?: string;
   teamId?: string;
   teamName?: string;
   projectId?: string;

@@ -61,27 +61,5 @@ export interface SyncResult {
 // Legacy compatibility aliases used by current provider stubs.
 export type ExternalTaskInput = Partial<ExternalTask>;
 
-export interface AgentCommand {
-  id: string;
-  timestamp: string;
-  source: "claude-code" | "codex";
-  command: "create" | "update" | "complete" | "query" | "bulk-create";
-  payload: {
-    title?: string;
-    description?: string;
-    project?: string;
-    priority?: Task["priority"];
-    subtasks?: string[];
-    taskId?: string;
-    updates?: Partial<Task>;
-    filter?: Record<string, unknown>;
-    tasks?: Array<{ title: string; priority?: string; project?: string }>;
-  };
-}
-
-export interface AgentResponse {
-  commandId: string;
-  status: "ok" | "error";
-  data?: Task | Task[];
-  error?: string;
-}
+// Re-export agent protocol types for backward compatibility
+export type { AgentCommand, AgentResponse } from "./agent-protocol.ts";
