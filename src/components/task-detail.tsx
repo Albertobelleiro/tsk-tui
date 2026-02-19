@@ -87,6 +87,11 @@ export function TaskDetailPanel({ task, isFocused, store }: TaskDetailPanelProps
   const hasSubtasks = subtasks.length > 0;
   const progress = store ? store.getProgress(task.id) : { done: 0, total: 0 };
 
+  // Parent reference
+  const parentTask = task.parentId && store
+    ? store.tasks.find(t => t.id === task.parentId) ?? null
+    : null;
+
   // Blocked status
   const isBlocked = store ? store.isBlocked(task.id) : false;
 
@@ -104,6 +109,12 @@ export function TaskDetailPanel({ task, isFocused, store }: TaskDetailPanelProps
       <DetailField label="Title">
         <text content={task.title} fg={colors.fg} />
       </DetailField>
+
+      {parentTask ? (
+        <DetailField label="Parent">
+          <text content={parentTask.title} fg={colors.fgDim} />
+        </DetailField>
+      ) : null}
 
       <DetailField label="Status">
         <text
@@ -198,6 +209,9 @@ export function TaskDetailPanel({ task, isFocused, store }: TaskDetailPanelProps
               />
             </box>
           ))}
+          <box height={1} paddingLeft={1}>
+            <text content="[A] Add subtask" fg={colors.fgDim} />
+          </box>
         </box>
       ) : null}
 

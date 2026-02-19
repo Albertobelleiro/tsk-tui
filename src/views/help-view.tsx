@@ -12,7 +12,7 @@ function Section({ title }: { title: string }) {
 function Binding({ keys, desc }: { keys: string; desc: string }) {
   return (
     <box flexDirection="row" height={1}>
-      <text content={keys.padEnd(10)} fg={colors.fgBright} attributes={1} />
+      <text content={keys.padEnd(12)} fg={colors.fgBright} attributes={1} />
       <text content={desc} fg={colors.fg} />
     </box>
   );
@@ -36,7 +36,7 @@ export function HelpView({ onClose }: HelpViewProps) {
     >
       <box
         flexDirection="column"
-        width={72}
+        width={80}
         backgroundColor={colors.bgModal}
         borderStyle="single"
         borderColor={colors.borderFocus}
@@ -57,7 +57,8 @@ export function HelpView({ onClose }: HelpViewProps) {
               <Binding keys="k / ↑" desc="Move up" />
               <Binding keys="g" desc="Go to top" />
               <Binding keys="G" desc="Go to bottom" />
-              <Binding keys="J / K" desc="Jump 10 up/down" />
+              <Binding keys="J" desc="Page down (10)" />
+              <Binding keys="K" desc="Page up (10)" />
               <Binding keys="Tab" desc="Switch panel" />
               <Binding keys="Enter" desc="Open / Select" />
               <Binding keys="Esc" desc="Back / Close" />
@@ -76,48 +77,16 @@ export function HelpView({ onClose }: HelpViewProps) {
               <box height={1} />
               <Binding keys="q" desc="Quit" />
               <Binding keys="Ctrl+C" desc="Quit" />
-              <Binding keys="Ctrl+S" desc="Force save" />
-              <Binding keys="Ctrl+T" desc="Cycle theme" />
               <box height={1} />
 
               <Section title="SUBTASKS" />
               <box height={1} />
-              <Binding keys="A" desc="Add subtask" />
-              <Binding keys="Shift+→" desc="Indent (subtask)" />
+              <Binding keys="A" desc="Add subtask to selected parent" />
+              <Binding keys="a" desc="Add sibling task (same level)" />
+              <Binding keys="Shift+→" desc="Indent (make subtask)" />
               <Binding keys="Shift+←" desc="Promote (top-level)" />
-            </box>
-
-            {/* Right column */}
-            <box flexDirection="column" width="50%">
-              <Section title="ACTIONS" />
-              <box height={1} />
-              <Binding keys="a" desc="Add new task" />
-              <Binding keys="e" desc="Edit task" />
-              <Binding keys="d" desc="Mark done/undone" />
-              <Binding keys="x" desc="Delete task" />
-              <Binding keys="/" desc="Search (Ctrl+F)" />
-              <Binding keys="!" desc="Set priority" />
-              <Binding keys="p" desc="Set project" />
-              <Binding keys="t" desc="Add/remove tag" />
-              <Binding keys="D" desc="Set due date" />
-              <Binding keys="s" desc="Cycle sort" />
-              <Binding keys="f" desc="Cycle filter" />
-              <Binding keys="u" desc="Undo" />
-              <Binding keys="Ctrl+R" desc="Redo" />
-              <box height={1} />
-
-              <Section title="VISUAL MODE" />
-              <box height={1} />
-              <Binding keys="v" desc="Enter visual mode" />
-              <Binding keys="V" desc="Select all visible" />
-              <Binding keys="d" desc="Mark selected done" />
-              <Binding keys="x" desc="Delete selected" />
-              <Binding keys="Esc" desc="Exit visual mode" />
-              <box height={1} />
-
-              <Section title="TIME TRACKING" />
-              <box height={1} />
-              <Binding keys="T" desc="Start/stop timer" />
+              <Binding keys="Enter/→" desc="Expand/collapse" />
+              <Binding keys="←" desc="Jump to parent" />
               <box height={1} />
 
               <Section title="BOARD VIEW" />
@@ -131,6 +100,49 @@ export function HelpView({ onClose }: HelpViewProps) {
               <Binding keys="h/j/k/l" desc="Navigate days" />
               <Binding keys="H / L" desc="Prev/Next month" />
               <Binding keys="t" desc="Jump to today" />
+            </box>
+
+            {/* Right column */}
+            <box flexDirection="column" width="50%">
+              <Section title="ACTIONS" />
+              <box height={1} />
+              <Binding keys="a" desc="Add task at root level" />
+              <Binding keys="A" desc="Add subtask (in list view)" />
+              <Binding keys="e" desc="Edit task" />
+              <Binding keys="d" desc="Mark done/undone" />
+              <Binding keys="x" desc="Delete task" />
+              <Binding keys="/" desc="Search" />
+              <Binding keys="!" desc="Set priority" />
+              <Binding keys="p" desc="Set project" />
+              <Binding keys="t" desc="Add/remove tag" />
+              <Binding keys="D" desc="Set due date" />
+              <Binding keys="s" desc="Cycle sort" />
+              <Binding keys="f" desc="Cycle filter" />
+              <Binding keys="u" desc="Undo" />
+              <Binding keys="Ctrl+R" desc="Redo" />
+              <Binding keys="T" desc="Set time estimate" />
+              <Binding keys="Shift+T" desc="Start/stop timer" />
+              <Binding keys="n" desc="View notes" />
+              <Binding keys="N" desc="Add note" />
+              <box height={1} />
+
+              <Section title="SYNC & AGENT" />
+              <box height={1} />
+              <Binding keys="Ctrl+S" desc="Save & sync" />
+              <box height={1} />
+
+              <Section title="VISUAL MODE" />
+              <box height={1} />
+              <Binding keys="v" desc="Enter visual mode" />
+              <Binding keys="V" desc="Select all visible" />
+              <Binding keys="d" desc="Mark selected done" />
+              <Binding keys="x" desc="Delete selected" />
+              <Binding keys="Esc" desc="Exit visual mode" />
+              <box height={1} />
+
+              <Section title="THEME" />
+              <box height={1} />
+              <Binding keys="Ctrl+T" desc="Cycle theme" />
             </box>
           </box>
         </scrollbox>

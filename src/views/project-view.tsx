@@ -48,7 +48,8 @@ export function ProjectView({ store, tasks, pushModal, isModalOpen }: ProjectVie
   const [colIndices, setColIndices] = useState<[number, number, number]>([0, 0, 0]);
 
   const columns = useMemo(() => COLUMNS.map(({ status }) => {
-    const col = tasks.filter((t) => t.status === status);
+    // Only show top-level tasks in kanban columns
+    const col = tasks.filter((t) => t.parentId === null && t.status === status);
     if (status === "done") {
       col.sort((a, b) => (b.completedAt ?? "").localeCompare(a.completedAt ?? ""));
     } else {
@@ -169,6 +170,16 @@ export function ProjectView({ store, tasks, pushModal, isModalOpen }: ProjectVie
               ) : col.map((task, i) => {
                 const isSel = isActive && i === selIdx;
                 const isDone = task.status === "done";
+                const hasSubtasks = task.subtaskIds.length > 0;
+                const progress = hasSubtasks ? store.getProgress(task.id) : null;
+                const progressStr = progress && progress.total > 0
+                  ? ` [${progress.done}/${progress.total}]`
+                  : "";
+                const progressColor = progress && progress.total > 0
+                  ? (progress.done === progress.total ? colors.green
+                    : progress.done > 0 ? colors.yellow
+                    : colors.fgDim)
+                  : colors.fgDim;
                 return (
                   <box
                     key={task.id}
@@ -186,6 +197,9 @@ export function ProjectView({ store, tasks, pushModal, isModalOpen }: ProjectVie
                       flexGrow={1}
                       overflow="hidden"
                     />
+                    {progressStr ? (
+                      <text content={progressStr} fg={progressColor} />
+                    ) : null}
                     <text
                       content={` ${PRIORITY_BADGE[task.priority]}`}
                       fg={colors.priority[task.priority]}

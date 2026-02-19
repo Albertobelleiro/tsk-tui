@@ -25,8 +25,11 @@ interface TaskRowProps {
   depth?: number;
   isLast?: boolean;
   isBlocked?: boolean;
+  isCollapsed?: boolean;
+  hasChildren?: boolean;
   progress?: { done: number; total: number } | null;
   isVisualSelected?: boolean;
+  ancestorIsLast?: boolean[];  // Track which ancestors are "last" for continuation lines
 }
 
 function getDueDateColor(iso: string): string {
@@ -43,8 +46,11 @@ export function TaskRow({
   depth = 0,
   isLast = true,
   isBlocked = false,
+  isCollapsed = false,
+  hasChildren = false,
   progress = null,
   isVisualSelected = false,
+  ancestorIsLast = [],
 }: TaskRowProps) {
   const isDone = task.status === "done";
   const prevStatusRef = useRef(task.status);
@@ -59,8 +65,9 @@ export function TaskRow({
     prevStatusRef.current = task.status;
   }, [task.status]);
 
-  const titleFg = isDone ? colors.fgDim : colors.fg;
-  const titleAttr = isDone ? 130 : 0;
+  const isSubtask = depth > 0;
+  const titleFg = isDone ? colors.fgDim : isSubtask ? colors.fgBright : colors.fg;
+  const titleAttr = isDone ? 130 : isSubtask ? 2 : 0; // dim attribute for subtasks
 
   const highlighted = isSelected || isVisualSelected;
   const bg = flash ? colors.green : highlighted ? colors.bgHighlight : undefined;
@@ -77,16 +84,31 @@ export function TaskRow({
     : isVisualSelected ? colors.accentAlt
     : "transparent";
 
-  // Tree indentation
-  const indent = depth > 0 ? "  ".repeat(depth - 1) + (isLast ? "└─ " : "├─ ") : "";
+  // Tree indentation with proper continuation lines
+  let indent = "";
+  if (depth > 0) {
+    // Build continuation lines for ancestors
+    for (let i = 0; i < depth - 1; i++) {
+      indent += ancestorIsLast[i] ? "  " : "│ ";
+    }
+    indent += isLast ? "└─ " : "├─ ";
+  }
+
+  // Collapse indicator for parent tasks
+  const collapseIcon = hasChildren
+    ? (isCollapsed ? "▸ " : "▾ ")
+    : "  ";
 
   // Progress suffix
   const progressStr = progress && progress.total > 0
     ? ` [${progress.done}/${progress.total}]`
     : "";
 
-  // Blocked icon
-  const blockedIcon = isBlocked ? "🔒" : "";
+  const progressColor = progress && progress.total > 0
+    ? (progress.done === progress.total ? colors.green
+      : progress.done > 0 ? colors.yellow
+      : colors.fgDim)
+    : colors.fgDim;
 
   // Recurrence icon
   const recurIcon = task.recurrence ? "🔄" : "";
@@ -104,6 +126,8 @@ export function TaskRow({
       />
       {/* Tree indent */}
       {indent ? <text content={indent} fg={colors.fgDim} /> : null}
+      {/* Collapse indicator */}
+      {collapseIcon ? <text content={collapseIcon} fg={colors.fgDim} /> : null}
       <text
         content={isBlocked ? "🔒" : STATUS_ICON[task.status]}
         fg={isBlocked ? colors.fgDim : colors.status[task.status]}
@@ -117,7 +141,7 @@ export function TaskRow({
         overflow="hidden"
       />
       {progressStr ? (
-        <text content={progressStr} fg={colors.fgDim} />
+        <text content={progressStr} fg={progressColor} />
       ) : null}
       {recurIcon ? (
         <text content={` ${recurIcon}`} fg={colors.fgDim} />

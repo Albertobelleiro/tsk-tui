@@ -75,14 +75,42 @@ export function TaskListView({
   const [visualSet, setVisualSet] = useState<Set<number>>(new Set());
   const [inlineAdd, setInlineAdd] = useState(false);
   const [inlineText, setInlineText] = useState("");
+  const [collapsed, setCollapsed] = useState<Set<string>>(new Set());
   const scrollRef = useRef<ScrollBoxRenderable>(null);
   const { width } = useTerminalDimensions();
   const isNarrow = width < 80;
 
+  function toggleCollapse(taskId: string) {
+    setCollapsed(prev => {
+      const next = new Set(prev);
+      if (next.has(taskId)) next.delete(taskId);
+      else next.add(taskId);
+      return next;
+    });
+  }
+
   // Build tree-ordered list
-  const treeItems = store.getFilteredTree(filter);
+  const allTreeItems = store.getFilteredTree(filter);
+
+  // Build task index for O(1) parent lookups
+  const taskIndex = new Map(store.tasks.map(t => [t.id, t]));
+
+  // Filter out children of collapsed parents
+  const treeItems = allTreeItems.filter(item => {
+    if (item.depth === 0) return true;
+    let current = item.task;
+    while (current.parentId) {
+      if (collapsed.has(current.parentId)) return false;
+      const parent = taskIndex.get(current.parentId);
+      if (!parent || parent.id === current.id) break;
+      current = parent;
+    }
+    return true;
+  });
+
   const flatTasks = treeItems.map((i) => i.task);
 
+  // Clamp selection when visible items change (collapse/filter)
   useEffect(() => {
     if (flatTasks.length === 0) return;
     setSelectedIndex((prev) => Math.min(prev, flatTasks.length - 1));
@@ -169,11 +197,24 @@ export function TaskListView({
 
     // Actions that work even with 0 tasks
     switch (e.name) {
+      case "return":
+      case "enter":
+        // Toggle collapse on parent tasks
+        if (selectedTask && selectedTask.subtaskIds.length > 0) {
+          toggleCollapse(selectedTask.id);
+          return;
+        }
+        break;
       case "a":
-        pushModal({ type: "add" });
+        // Add sibling: if selected is a subtask, new task gets same parentId
+        if (selectedTask && selectedTask.parentId) {
+          pushModal({ type: "add-subtask", parent: store.tasks.find(t => t.id === selectedTask.parentId)! });
+        } else {
+          pushModal({ type: "add" });
+        }
         return;
       case "A": // Inline quick-add or add subtask
-        if (selectedTask && selectedTask.subtaskIds.length >= 0) {
+        if (selectedTask && selectedTask.subtaskIds.length > 0) {
           // Add subtask to selected parent
           pushModal({ type: "add-subtask", parent: selectedTask });
         } else {
@@ -255,13 +296,23 @@ export function TaskListView({
       case "l":
       case "right":
         if (e.shift && selectedTask) {
-          // Indent: make subtask of task above
+          // Indent: make subtask of task above (max depth 5)
           if (selectedIndex > 0) {
             const above = flatTasks[selectedIndex - 1]!;
+            const aboveItem = treeItems[selectedIndex - 1]!;
+            if (aboveItem.depth >= 5) {
+              showToast("Max nesting depth (5) reached", "info");
+              return;
+            }
             if (store.indentTask(selectedTask.id, above.id)) {
               showToast(`Indented under "${above.title}"`, "info");
             }
           }
+          return;
+        }
+        // → on parent: expand (if collapsed)
+        if (selectedTask && selectedTask.subtaskIds.length > 0 && collapsed.has(selectedTask.id)) {
+          toggleCollapse(selectedTask.id);
           return;
         }
         if (!isNarrow) setFocusPanel("detail");
@@ -273,6 +324,19 @@ export function TaskListView({
           if (store.promoteSubtask(selectedTask.id)) {
             showToast("Promoted to top level", "info");
           }
+          return;
+        }
+        // ← on subtask: jump to parent
+        if (selectedTask && selectedTask.parentId) {
+          const parentIdx = flatTasks.findIndex(t => t.id === selectedTask.parentId);
+          if (parentIdx >= 0) {
+            setSelectedIndex(parentIdx);
+            return;
+          }
+        }
+        // ← on expanded parent: collapse
+        if (selectedTask && selectedTask.subtaskIds.length > 0 && !collapsed.has(selectedTask.id)) {
+          toggleCollapse(selectedTask.id);
           return;
         }
         setFocusPanel("list");
@@ -389,19 +453,48 @@ export function TaskListView({
           viewportCulling={true}
           flexGrow={1}
         >
-          {treeItems.map((item, i) => (
-            <TaskRow
-              key={item.task.id}
-              task={item.task}
-              isSelected={i === selectedIndex}
-              isFocused={listFocused && i === selectedIndex}
-              depth={item.depth}
-              isLast={item.isLast}
-              isBlocked={store.isBlocked(item.task.id)}
-              progress={item.task.subtaskIds.length > 0 ? store.getProgress(item.task.id) : null}
-              isVisualSelected={visualMode && visualSet.has(i)}
-            />
-          ))}
+          {treeItems.map((item, i) => {
+            // Build ancestorIsLast by walking up parents
+            const ancestorIsLast: boolean[] = [];
+            if (item.depth > 1) {
+              let cur = item.task;
+              const stack: boolean[] = [];
+              // Walk through prior items to find ancestors
+              for (let d = item.depth - 1; d >= 1; d--) {
+                // Find the ancestor at this depth by scanning backwards
+                let found = false;
+                for (let j = i - 1; j >= 0; j--) {
+                  if (treeItems[j]!.depth === d) {
+                    stack.unshift(treeItems[j]!.isLast);
+                    found = true;
+                    break;
+                  }
+                  if (treeItems[j]!.depth < d) break;
+                }
+                // If no ancestor found at this depth, treat as "is last" to avoid undefined
+                if (!found) {
+                  stack.unshift(true);
+                }
+              }
+              ancestorIsLast.push(...stack);
+            }
+            return (
+              <TaskRow
+                key={item.task.id}
+                task={item.task}
+                isSelected={i === selectedIndex}
+                isFocused={listFocused && i === selectedIndex}
+                depth={item.depth}
+                isLast={item.isLast}
+                isBlocked={store.isBlocked(item.task.id)}
+                isCollapsed={collapsed.has(item.task.id)}
+                hasChildren={item.task.subtaskIds.length > 0}
+                progress={item.task.subtaskIds.length > 0 ? store.getProgress(item.task.id) : null}
+                isVisualSelected={visualMode && visualSet.has(i)}
+                ancestorIsLast={ancestorIsLast}
+              />
+            );
+          })}
           {/* Inline quick-add row */}
           {inlineAdd ? (
             <box flexDirection="row" height={1} backgroundColor={colors.bgHighlight}>
