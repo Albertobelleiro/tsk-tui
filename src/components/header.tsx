@@ -1,19 +1,21 @@
-import { useState } from "react";
-import { useKeyboard } from "@opentui/react";
 import { colors } from "../theme/colors.ts";
+import { getThemeName } from "../theme/colors.ts";
 
-export type View = "list" | "board" | "calendar" | "help";
+export type View = "list" | "board" | "calendar" | "dashboard" | "help";
 
 interface HeaderProps {
   activeView: View;
   onViewChange: (view: View) => void;
+  agentActive?: boolean;
+  timerActive?: boolean;
 }
 
-export function Header({ activeView, onViewChange }: HeaderProps) {
+export function Header({ activeView, onViewChange, agentActive = false, timerActive = false }: HeaderProps) {
   const tabs: { key: string; label: string; view: View }[] = [
     { key: "1", label: "List", view: "list" },
     { key: "2", label: "Board", view: "board" },
     { key: "3", label: "Cal", view: "calendar" },
+    { key: "4", label: "Stats", view: "dashboard" },
   ];
 
   return (
@@ -39,6 +41,12 @@ export function Header({ activeView, onViewChange }: HeaderProps) {
         );
       })}
       <box flexGrow={1} />
+      {timerActive ? (
+        <text content=" ⏱ " fg={colors.yellow} />
+      ) : null}
+      {agentActive ? (
+        <text content=" 🤖 Agent " fg={colors.green} />
+      ) : null}
       <text
         content=" [?] Help  "
         fg={activeView === "help" ? colors.accent : colors.fgDim}

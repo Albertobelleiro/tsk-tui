@@ -35,3 +35,11 @@ report.[0-9]_.[0-9]_.[0-9]_.[0-9]_.json
 
 # Backups
 *.bak
+
+# Website build output
+website/dist
+
+# Large asset originals (PSD, AI, Figma exports)
+assets/**/*.psd
+assets/**/*.ai
+assets/**/*.fig

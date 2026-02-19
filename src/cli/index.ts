@@ -2,6 +2,9 @@ import { TaskStore } from "../store/task-store.ts";
 import type { Task, TaskStatus, TaskPriority } from "../store/types.ts";
 import { isDueOverdue, isDueToday, isDueThisWeek } from "../utils/date.ts";
 import {
+  loadConfig, saveConfig, getConfigValue, setConfigValue, resetConfig,
+} from "../config/config.ts";
+import {
   setColorEnabled, bold, dim, cyan, green, red,
   formatTaskTable, formatTaskDetail, success, error,
 } from "./format.ts";
@@ -40,6 +43,9 @@ function positionalArgs(args: string[]): string[] {
   const flagsWithValue = new Set([
     "--priority", "-p", "--project", "-P", "--tag", "-t",
     "--due", "-d", "--desc", "--title", "--status", "--sort",
+    "--subtask-of", "--under", "--format", "--recur",
+    "--estimate", "--api-key", "--token", "--repo", "--team",
+    "--workspace",
   ]);
   for (let i = 0; i < args.length; i++) {
     const a = args[i]!;
@@ -138,9 +144,31 @@ function sortTasks(tasks: Task[], sortBy: string): Task[] {
   return sorted;
 }
 
+// ── Time format helpers ─────────────────────────────
+
+function parseTimeInput(val: string): number | null {
+  // Accepts: "2h", "2h30m", "45m", "90" (minutes), "1.5h"
+  const hMatch = val.match(/^(\d+(?:\.\d+)?)\s*h$/i);
+  if (hMatch) return Math.round(parseFloat(hMatch[1]!) * 60);
+  const hmMatch = val.match(/^(\d+)\s*h\s*(\d+)\s*m$/i);
+  if (hmMatch) return parseInt(hmMatch[1]!) * 60 + parseInt(hmMatch[2]!);
+  const mMatch = val.match(/^(\d+)\s*m$/i);
+  if (mMatch) return parseInt(mMatch[1]!);
+  const num = parseInt(val);
+  if (!isNaN(num)) return num;
+  return null;
+}
+
+function formatMinutes(m: number): string {
+  if (m < 60) return `${m}m`;
+  const h = Math.floor(m / 60);
+  const min = m % 60;
+  return min > 0 ? `${h}h ${min}m` : `${h}h`;
+}
+
 // ── Help texts ───────────────────────────────────────
 
-const HELP_MAIN = `tsk — terminal task manager v0.1.0
+const HELP_MAIN = `tsk — terminal task manager v0.2.0
 
 Usage:
   tsk                          Open interactive TUI
@@ -155,6 +183,13 @@ Usage:
   tsk search <query>           Search tasks
   tsk projects                 List projects
   tsk tags                     List tags
+  tsk subtasks <id>            List subtasks
+  tsk indent <id> --under <id> Make task a subtask
+  tsk promote <id>             Make subtask top-level
+  tsk estimate <id> <time>     Set time estimate
+  tsk log <id> <time>          Log time spent
+  tsk config <get|set|list|reset|edit>  Manage config
+  tsk export [--format json|csv|markdown]
 
 Flags:
   -h, --help                   Show this help
@@ -170,7 +205,10 @@ Flags:
   -P, --project <name>     Project name
   -t, --tag <tags>         Comma-separated tags
   -d, --due <date>         Due date: YYYY-MM-DD
-      --desc <text>        Description text`;
+      --desc <text>        Description text
+      --subtask-of <id>    Create as subtask of <id>
+      --recur <freq>       daily|weekly|monthly|yearly
+      --estimate <time>    Time estimate: 2h, 45m, 1h30m`;
 
 const HELP_LIST = `Usage: tsk list [flags]
 
@@ -224,7 +262,42 @@ async function cmdAdd(args: string[]): Promise<number> {
   const tags = tagStr ? tagStr.split(",").map((s) => s.trim()).filter(Boolean) : [];
   const description = getFlag(args, "--desc") ?? "";
 
+  // Subtask support
+  const subtaskOfId = getFlag(args, "--subtask-of");
+
+  // Recurrence
+  const recurVal = getFlag(args, "--recur");
+  let recurrence = null;
+  if (recurVal) {
+    const validFreq = ["daily", "weekly", "monthly", "yearly"] as const;
+    if (!validFreq.includes(recurVal as typeof validFreq[number])) {
+      error(`Invalid recurrence: "${recurVal}". Must be daily|weekly|monthly|yearly`);
+      return EXIT_VALIDATION;
+    }
+    recurrence = { frequency: recurVal as typeof validFreq[number], interval: 1 };
+  }
+
+  // Estimate
+  const estimateVal = getFlag(args, "--estimate");
+  let estimateMinutes: number | null = null;
+  if (estimateVal) {
+    estimateMinutes = parseTimeInput(estimateVal);
+    if (estimateMinutes === null) {
+      error(`Invalid time format: "${estimateVal}". Use 2h, 45m, 1h30m`);
+      return EXIT_VALIDATION;
+    }
+  }
+
   const store = await TaskStore.create();
+
+  // Resolve parent if subtask
+  let parentId: string | null = null;
+  if (subtaskOfId) {
+    const result = resolveTaskId(store.tasks, subtaskOfId);
+    if (!result.ok) return result.code;
+    parentId = result.task.id;
+  }
+
   const task = store.addTask({
     title,
     description,
@@ -232,6 +305,9 @@ async function cmdAdd(args: string[]): Promise<number> {
     project,
     tags,
     dueDate: dueVal,
+    parentId,
+    recurrence,
+    estimateMinutes,
   });
   await store.save();
 
@@ -321,6 +397,41 @@ async function cmdShow(args: string[]): Promise<number> {
   if (!result.ok) return result.code;
 
   console.log(formatTaskDetail(result.task));
+
+  // Show subtasks if any
+  const subtasks = store.getSubtasks(result.task.id);
+  if (subtasks.length > 0) {
+    const progress = store.getProgress(result.task.id);
+    console.log(`\n  ${bold("Subtasks")} [${progress.done}/${progress.total}]:`);
+    for (const st of subtasks) {
+      const icon = st.status === "done" ? green("✓") : dim("○");
+      console.log(`    ${icon} ${st.title}`);
+    }
+  }
+
+  // Show time tracking
+  if (result.task.estimateMinutes || result.task.actualMinutes) {
+    console.log("");
+    if (result.task.estimateMinutes) {
+      console.log(`  ${bold("Estimate:")} ${formatMinutes(result.task.estimateMinutes)}`);
+    }
+    if (result.task.actualMinutes) {
+      console.log(`  ${bold("Actual:")}   ${formatMinutes(result.task.actualMinutes)}`);
+    }
+    if (result.task.estimateMinutes && result.task.actualMinutes) {
+      const remaining = result.task.estimateMinutes - result.task.actualMinutes;
+      console.log(`  ${bold("Remaining:")} ${remaining > 0 ? formatMinutes(remaining) : green("complete")}`);
+    }
+  }
+
+  // Show notes
+  if (result.task.notes.length > 0) {
+    console.log(`\n  ${bold("Notes")} (${result.task.notes.length}):`);
+    for (const note of result.task.notes) {
+      console.log(`    ${dim(note.createdAt.slice(0, 10))} ${note.content}`);
+    }
+  }
+
   return EXIT_OK;
 }
 
@@ -419,6 +530,17 @@ async function cmdDone(args: string[]): Promise<number> {
   const result = resolveTaskId(store.tasks, partial);
   if (!result.ok) return result.code;
 
+  // Handle recurring tasks
+  if (result.task.recurrence) {
+    const nextTask = store.completeRecurring(result.task.id);
+    await store.save();
+    success(`Marked done: "${result.task.title}"`);
+    if (nextTask) {
+      console.log(`  Next occurrence: ${nextTask.dueDate}`);
+    }
+    return EXIT_OK;
+  }
+
   const wasDone = result.task.status === "done";
   store.toggleDone(result.task.id);
   await store.save();
@@ -427,6 +549,12 @@ async function cmdDone(args: string[]): Promise<number> {
     success(`Marked todo: "${result.task.title}"`);
   } else {
     success(`Marked done: "${result.task.title}"`);
+    // Check if this unblocked anything
+    const unblocked = store.getUnblockedTasks(result.task.id);
+    for (const uid of unblocked) {
+      const ut = store.tasks.find((t) => t.id === uid);
+      if (ut) console.log(`  Unblocked: ${ut.title}`);
+    }
   }
   return EXIT_OK;
 }
@@ -588,6 +716,248 @@ async function cmdTags(args: string[]): Promise<number> {
   return EXIT_OK;
 }
 
+// ── Subtask commands ─────────────────────────────────
+
+async function cmdSubtasks(args: string[]): Promise<number> {
+  const pos = positionalArgs(args);
+  const partial = pos[0];
+  if (!partial) {
+    error("Missing required argument: <parent-id>");
+    return EXIT_VALIDATION;
+  }
+
+  const store = await TaskStore.create();
+  const result = resolveTaskId(store.tasks, partial);
+  if (!result.ok) return result.code;
+
+  const subtasks = store.getSubtasks(result.task.id);
+  if (subtasks.length === 0) {
+    console.log(dim("  No subtasks."));
+    return EXIT_OK;
+  }
+
+  const progress = store.getProgress(result.task.id);
+  console.log(bold(`  ${result.task.title} [${progress.done}/${progress.total}]`));
+  console.log("");
+
+  if (hasFlag(args, "--json")) {
+    console.log(JSON.stringify(subtasks, null, 2));
+  } else {
+    console.log(formatTaskTable(subtasks));
+  }
+
+  return EXIT_OK;
+}
+
+async function cmdIndent(args: string[]): Promise<number> {
+  const pos = positionalArgs(args);
+  const partial = pos[0];
+  if (!partial) {
+    error("Missing required argument: <task-id>");
+    return EXIT_VALIDATION;
+  }
+
+  const underVal = getFlag(args, "--under");
+  if (!underVal) {
+    error("Missing required flag: --under <parent-id>");
+    return EXIT_VALIDATION;
+  }
+
+  const store = await TaskStore.create();
+  const taskResult = resolveTaskId(store.tasks, partial);
+  if (!taskResult.ok) return taskResult.code;
+
+  const parentResult = resolveTaskId(store.tasks, underVal);
+  if (!parentResult.ok) return parentResult.code;
+
+  const ok = store.indentTask(taskResult.task.id, parentResult.task.id);
+  if (!ok) {
+    error("Could not indent task (circular reference or invalid)");
+    return EXIT_ERROR;
+  }
+
+  await store.save();
+  success(`"${taskResult.task.title}" is now a subtask of "${parentResult.task.title}"`);
+  return EXIT_OK;
+}
+
+async function cmdPromote(args: string[]): Promise<number> {
+  const pos = positionalArgs(args);
+  const partial = pos[0];
+  if (!partial) {
+    error("Missing required argument: <task-id>");
+    return EXIT_VALIDATION;
+  }
+
+  const store = await TaskStore.create();
+  const result = resolveTaskId(store.tasks, partial);
+  if (!result.ok) return result.code;
+
+  const ok = store.promoteSubtask(result.task.id);
+  if (!ok) {
+    error("Task is not a subtask or could not be promoted");
+    return EXIT_ERROR;
+  }
+
+  await store.save();
+  success(`Promoted: "${result.task.title}" to top level`);
+  return EXIT_OK;
+}
+
+// ── Time tracking commands ───────────────────────────
+
+async function cmdEstimate(args: string[]): Promise<number> {
+  const pos = positionalArgs(args);
+  if (pos.length < 2) {
+    error("Usage: tsk estimate <id> <time>");
+    return EXIT_VALIDATION;
+  }
+
+  const store = await TaskStore.create();
+  const result = resolveTaskId(store.tasks, pos[0]!);
+  if (!result.ok) return result.code;
+
+  const minutes = parseTimeInput(pos[1]!);
+  if (minutes === null) {
+    error(`Invalid time format: "${pos[1]}". Use 2h, 45m, 1h30m`);
+    return EXIT_VALIDATION;
+  }
+
+  store.setEstimate(result.task.id, minutes);
+  await store.save();
+  success(`Estimate set: ${formatMinutes(minutes)} for "${result.task.title}"`);
+  return EXIT_OK;
+}
+
+async function cmdLogTime(args: string[]): Promise<number> {
+  const pos = positionalArgs(args);
+  if (pos.length < 2) {
+    error("Usage: tsk log <id> <time>");
+    return EXIT_VALIDATION;
+  }
+
+  const store = await TaskStore.create();
+  const result = resolveTaskId(store.tasks, pos[0]!);
+  if (!result.ok) return result.code;
+
+  const minutes = parseTimeInput(pos[1]!);
+  if (minutes === null) {
+    error(`Invalid time format: "${pos[1]}". Use 2h, 45m, 1h30m`);
+    return EXIT_VALIDATION;
+  }
+
+  store.logTime(result.task.id, minutes);
+  await store.save();
+  success(`Logged ${formatMinutes(minutes)} for "${result.task.title}"`);
+  return EXIT_OK;
+}
+
+// ── Config commands ──────────────────────────────────
+
+async function cmdConfig(args: string[]): Promise<number> {
+  const pos = positionalArgs(args);
+  const sub = pos[0];
+
+  switch (sub) {
+    case "get": {
+      const key = pos[1];
+      if (!key) { error("Usage: tsk config get <key>"); return EXIT_VALIDATION; }
+      const val = await getConfigValue(key);
+      console.log(val !== undefined ? JSON.stringify(val, null, 2) : dim("(not set)"));
+      return EXIT_OK;
+    }
+    case "set": {
+      const key = pos[1];
+      const value = pos[2];
+      if (!key || value === undefined) { error("Usage: tsk config set <key> <value>"); return EXIT_VALIDATION; }
+      await setConfigValue(key, value);
+      success(`Set ${key} = ${value}`);
+      return EXIT_OK;
+    }
+    case "list": {
+      const config = await loadConfig();
+      console.log(JSON.stringify(config, null, 2));
+      return EXIT_OK;
+    }
+    case "reset": {
+      await resetConfig();
+      success("Config reset to defaults");
+      return EXIT_OK;
+    }
+    case "edit": {
+      const editor = process.env.EDITOR || "vim";
+      const { homedir } = await import("node:os");
+      const { join } = await import("node:path");
+      const configPath = join(homedir(), ".tsk", "config.json");
+      // Ensure config file exists
+      const config = await loadConfig();
+      await saveConfig(config);
+      const proc = Bun.spawn([editor, configPath], { stdio: ["inherit", "inherit", "inherit"] });
+      await proc.exited;
+      return EXIT_OK;
+    }
+    default:
+      error("Usage: tsk config <get|set|list|reset|edit>");
+      return EXIT_VALIDATION;
+  }
+}
+
+// ── Export command ────────────────────────────────────
+
+async function cmdExport(args: string[]): Promise<number> {
+  const format = getFlag(args, "--format") ?? "json";
+  const store = await TaskStore.create();
+  const tasks = store.tasks.filter((t) => t.status !== "archived");
+
+  switch (format) {
+    case "json":
+      console.log(JSON.stringify(tasks, null, 2));
+      break;
+    case "csv": {
+      console.log("id,title,status,priority,project,due_date,created_at,completed_at,tags");
+      for (const t of tasks) {
+        const escape = (s: string) => `"${s.replace(/"/g, '""')}"`;
+        console.log([
+          t.id.slice(0, 8),
+          escape(t.title),
+          t.status,
+          t.priority,
+          t.project ?? "",
+          t.dueDate ?? "",
+          t.createdAt.slice(0, 10),
+          t.completedAt?.slice(0, 10) ?? "",
+          t.tags.join(";"),
+        ].join(","));
+      }
+      break;
+    }
+    case "markdown": {
+      console.log("# Tasks\n");
+      const grouped = new Map<string, Task[]>();
+      for (const t of tasks) {
+        const key = t.project ?? "(No Project)";
+        if (!grouped.has(key)) grouped.set(key, []);
+        grouped.get(key)!.push(t);
+      }
+      for (const [project, projectTasks] of grouped) {
+        console.log(`## ${project}\n`);
+        for (const t of projectTasks) {
+          const check = t.status === "done" ? "x" : " ";
+          const pri = t.priority !== "none" ? ` [${t.priority}]` : "";
+          const due = t.dueDate ? ` (due: ${t.dueDate})` : "";
+          console.log(`- [${check}] ${t.title}${pri}${due}`);
+        }
+        console.log("");
+      }
+      break;
+    }
+    default:
+      error(`Unknown format: "${format}". Use json, csv, or markdown`);
+      return EXIT_VALIDATION;
+  }
+  return EXIT_OK;
+}
+
 // ── Bulk operations ──────────────────────────────────
 
 function filterBulk(tasks: Task[], args: string[]): Task[] {
@@ -685,7 +1055,7 @@ export async function runCLI(args: string[]): Promise<number> {
   setColorEnabled(!noColor);
 
   if (hasFlag(args, "--version", "-v")) {
-    console.log("tsk v0.1.0");
+    console.log("tsk v0.2.0");
     return EXIT_OK;
   }
 
@@ -701,8 +1071,6 @@ export async function runCLI(args: string[]): Promise<number> {
   }
 
   // Remove subcommand from args for sub-handlers
-  const subArgs = args.filter((a) => a !== subcommand || a.startsWith("-"));
-  // More precise: remove the first occurrence of subcommand
   const subIdx = args.indexOf(subcommand);
   const handlerArgs = [...args.slice(0, subIdx), ...args.slice(subIdx + 1)];
 
@@ -719,6 +1087,13 @@ export async function runCLI(args: string[]): Promise<number> {
       case "search": return await cmdSearch(handlerArgs);
       case "projects": return await cmdProjects(handlerArgs);
       case "tags": return await cmdTags(handlerArgs);
+      case "subtasks": return await cmdSubtasks(handlerArgs);
+      case "indent": return await cmdIndent(handlerArgs);
+      case "promote": return await cmdPromote(handlerArgs);
+      case "estimate": return await cmdEstimate(handlerArgs);
+      case "log": return await cmdLogTime(handlerArgs);
+      case "config": return await cmdConfig(handlerArgs);
+      case "export": return await cmdExport(handlerArgs);
       default:
         error(`Unknown command: "${subcommand}"`);
         console.error("Run 'tsk --help' for usage.");

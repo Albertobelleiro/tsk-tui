@@ -22,6 +22,11 @@ interface TaskRowProps {
   task: Task;
   isSelected: boolean;
   isFocused: boolean;
+  depth?: number;
+  isLast?: boolean;
+  isBlocked?: boolean;
+  progress?: { done: number; total: number } | null;
+  isVisualSelected?: boolean;
 }
 
 function getDueDateColor(iso: string): string {
@@ -31,7 +36,16 @@ function getDueDateColor(iso: string): string {
   return colors.fgDim;
 }
 
-export function TaskRow({ task, isSelected, isFocused }: TaskRowProps) {
+export function TaskRow({
+  task,
+  isSelected,
+  isFocused,
+  depth = 0,
+  isLast = true,
+  isBlocked = false,
+  progress = null,
+  isVisualSelected = false,
+}: TaskRowProps) {
   const isDone = task.status === "done";
   const prevStatusRef = useRef(task.status);
   const [flash, setFlash] = useState(false);
@@ -48,7 +62,8 @@ export function TaskRow({ task, isSelected, isFocused }: TaskRowProps) {
   const titleFg = isDone ? colors.fgDim : colors.fg;
   const titleAttr = isDone ? 130 : 0;
 
-  const bg = flash ? colors.green : isSelected ? colors.bgHighlight : undefined;
+  const highlighted = isSelected || isVisualSelected;
+  const bg = flash ? colors.green : highlighted ? colors.bgHighlight : undefined;
 
   const project = task.project
     ? task.project.length > 8 ? task.project.slice(0, 7) + "…" : task.project
@@ -59,7 +74,22 @@ export function TaskRow({ task, isSelected, isFocused }: TaskRowProps) {
 
   const accentColor = isSelected
     ? isFocused ? colors.accent : colors.border
+    : isVisualSelected ? colors.accentAlt
     : "transparent";
+
+  // Tree indentation
+  const indent = depth > 0 ? "  ".repeat(depth - 1) + (isLast ? "└─ " : "├─ ") : "";
+
+  // Progress suffix
+  const progressStr = progress && progress.total > 0
+    ? ` [${progress.done}/${progress.total}]`
+    : "";
+
+  // Blocked icon
+  const blockedIcon = isBlocked ? "🔒" : "";
+
+  // Recurrence icon
+  const recurIcon = task.recurrence ? "🔄" : "";
 
   return (
     <box
@@ -69,12 +99,14 @@ export function TaskRow({ task, isSelected, isFocused }: TaskRowProps) {
     >
       {/* Left accent bar */}
       <text
-        content={isSelected ? "▎" : " "}
+        content={highlighted ? "▎" : " "}
         fg={accentColor}
       />
+      {/* Tree indent */}
+      {indent ? <text content={indent} fg={colors.fgDim} /> : null}
       <text
-        content={STATUS_ICON[task.status]}
-        fg={colors.status[task.status]}
+        content={isBlocked ? "🔒" : STATUS_ICON[task.status]}
+        fg={isBlocked ? colors.fgDim : colors.status[task.status]}
       />
       <text content=" " />
       <text
@@ -84,6 +116,12 @@ export function TaskRow({ task, isSelected, isFocused }: TaskRowProps) {
         flexGrow={1}
         overflow="hidden"
       />
+      {progressStr ? (
+        <text content={progressStr} fg={colors.fgDim} />
+      ) : null}
+      {recurIcon ? (
+        <text content={` ${recurIcon}`} fg={colors.fgDim} />
+      ) : null}
       {project ? (
         <text
           content={`  ${project}`}

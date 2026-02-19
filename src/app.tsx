@@ -1,14 +1,16 @@
-import { useState, useCallback, useSyncExternalStore } from "react";
+import { useState, useCallback, useEffect, useSyncExternalStore } from "react";
 import { useKeyboard, useRenderer, useTerminalDimensions } from "@opentui/react";
 import type { TaskStore } from "./store/task-store.ts";
 import type { Task, TaskPriority, FilterState } from "./store/types.ts";
 import { DEFAULT_FILTER } from "./store/types.ts";
-import { colors } from "./theme/colors.ts";
+import { colors, cycleTheme, getThemeName } from "./theme/colors.ts";
 import { Header, type View } from "./components/header.tsx";
 import { StatusBar } from "./components/status-bar.tsx";
+import { ToastContainer, showToast } from "./components/toast.tsx";
 import { TaskListView } from "./views/task-list.tsx";
 import { ProjectView } from "./views/project-view.tsx";
 import { CalendarView } from "./views/calendar-view.tsx";
+import { DashboardView } from "./views/dashboard-view.tsx";
 import { HelpView } from "./views/help-view.tsx";
 import { InputModal } from "./components/input-modal.tsx";
 import { ConfirmModal } from "./components/confirm-modal.tsx";
@@ -21,7 +23,8 @@ type ModalType =
   | { type: "select-priority"; task: Task }
   | { type: "select-project"; task: Task }
   | { type: "select-tags"; task: Task }
-  | { type: "input-due-date"; task: Task };
+  | { type: "input-due-date"; task: Task }
+  | { type: "add-subtask"; parent: Task };
 
 interface AppProps {
   store: TaskStore;
@@ -57,10 +60,23 @@ export function App({ store }: AppProps) {
   const [modalStack, setModalStack] = useState<ModalType[]>([]);
   const [filter, setFilter] = useState<FilterState>({ ...DEFAULT_FILTER });
   const [statusMessage, setStatusMessage] = useState<string | null>(null);
+  const [visualCount, setVisualCount] = useState(0);
+  const [, setTick] = useState(0); // For timer updates
 
   const _snapshot = useSyncExternalStore(store.subscribe, store.getSnapshot);
   const filteredTasks = store.getFiltered(filter);
   const stats = store.getStats();
+
+  // Timer display update
+  useEffect(() => {
+    if (!store.activeTimerTaskId) return;
+    const timer = setInterval(() => setTick((n) => n + 1), 1000);
+    return () => clearInterval(timer);
+  }, [store.activeTimerTaskId]);
+
+  const timerText = store.activeTimerTaskId && store.activeTimerStart
+    ? formatTimer(Date.now() - store.activeTimerStart)
+    : null;
 
   const pushModal = useCallback((modal: ModalType) => {
     setModalStack((s) => [...s, modal]);
@@ -77,11 +93,16 @@ export function App({ store }: AppProps) {
   }, []);
 
   useKeyboard((e) => {
-    // Ctrl+S force save — intercept before views handle plain 's'
+    // Ctrl+S force save
     if (e.name === "s" && e.ctrl) {
       store.save();
-      setStatusMessage("Saved!");
-      setTimeout(() => setStatusMessage(null), 1500);
+      showToast("Saved!", "success");
+      return;
+    }
+    // Ctrl+T cycle theme
+    if (e.name === "t" && e.ctrl) {
+      const next = cycleTheme();
+      showToast(`Theme: ${next}`, "info");
       return;
     }
     if (isModalOpen) return;
@@ -89,6 +110,7 @@ export function App({ store }: AppProps) {
       case "1": setActiveView("list"); break;
       case "2": setActiveView("board"); break;
       case "3": setActiveView("calendar"); break;
+      case "4": setActiveView("dashboard"); break;
       case "?": setActiveView(activeView === "help" ? "list" : "help"); break;
       case "q": renderer.destroy(); break;
     }
@@ -100,6 +122,16 @@ export function App({ store }: AppProps) {
     project: string | null; tags: string[]; dueDate: string | null;
   }) => {
     store.addTask(values);
+    showToast(`Added: "${values.title}"`, "success");
+    popModal();
+  }, [store, popModal]);
+
+  const handleAddSubtask = useCallback((parent: Task, values: {
+    title: string; description: string; priority: TaskPriority;
+    project: string | null; tags: string[]; dueDate: string | null;
+  }) => {
+    store.addSubtask(parent.id, values);
+    showToast(`Subtask added to "${parent.title}"`, "success");
     popModal();
   }, [store, popModal]);
 
@@ -129,7 +161,11 @@ export function App({ store }: AppProps) {
 
   return (
     <box flexDirection="column" flexGrow={1} backgroundColor={colors.bg}>
-      <Header activeView={activeView} onViewChange={setActiveView} />
+      <Header
+        activeView={activeView}
+        onViewChange={setActiveView}
+        timerActive={store.activeTimerTaskId !== null}
+      />
 
       {activeView === "list" ? (
         <TaskListView
@@ -140,6 +176,7 @@ export function App({ store }: AppProps) {
           isModalOpen={isModalOpen}
           filter={filter}
           onFilterChange={handleFilterChange}
+          onVisualCountChange={setVisualCount}
         />
       ) : activeView === "board" ? (
         <ProjectView
@@ -150,6 +187,8 @@ export function App({ store }: AppProps) {
         />
       ) : activeView === "calendar" ? (
         <CalendarView store={store} pushModal={pushModal} isModalOpen={isModalOpen} />
+      ) : activeView === "dashboard" ? (
+        <DashboardView store={store} />
       ) : activeView === "help" ? (
         <HelpView onClose={() => setActiveView("list")} />
       ) : null}
@@ -163,14 +202,28 @@ export function App({ store }: AppProps) {
           sortBy={sortStr}
           searchActive={searchActive}
           message={statusMessage}
+          undoCount={store.undoCount}
+          redoCount={store.redoCount}
+          timerText={timerText}
+          visualCount={visualCount}
         />
       )}
+
+      {/* Toast overlay */}
+      <ToastContainer />
 
       {/* Modal overlay */}
       {activeModal?.type === "add" && (
         <InputModal
           mode="add"
           onSubmit={handleAddTask}
+          onCancel={popModal}
+        />
+      )}
+      {activeModal?.type === "add-subtask" && (
+        <InputModal
+          mode="add"
+          onSubmit={(values) => handleAddSubtask(activeModal.parent, values)}
           onCancel={popModal}
         />
       )}
@@ -195,6 +248,7 @@ export function App({ store }: AppProps) {
           message={`Delete "${activeModal.task.title}"?\nThis cannot be undone.`}
           onConfirm={() => {
             store.deleteTask(activeModal.task.id);
+            showToast(`Deleted: "${activeModal.task.title}"`, "success");
             popModal();
           }}
           onCancel={popModal}
@@ -220,7 +274,6 @@ export function App({ store }: AppProps) {
           allowNew={true}
           onSelect={(value) => {
             if (value === "__new__") {
-              // Close select, user can use edit modal to type project
               popModal();
               return;
             }
@@ -258,4 +311,12 @@ export function App({ store }: AppProps) {
       )}
     </box>
   );
+}
+
+function formatTimer(ms: number): string {
+  const totalSeconds = Math.floor(ms / 1000);
+  const h = Math.floor(totalSeconds / 3600);
+  const m = Math.floor((totalSeconds % 3600) / 60);
+  const s = totalSeconds % 60;
+  return `${String(h).padStart(2, "0")}:${String(m).padStart(2, "0")}:${String(s).padStart(2, "0")}`;
 }

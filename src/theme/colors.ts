@@ -1,38 +1,34 @@
-// Tokyo Night inspired palette
-export const colors = {
-  bg:           "#1a1b26",
-  bgDark:       "#16161e",
-  bgHighlight:  "#292e42",
-  bgModal:      "#24283b",
+import type { ThemeName } from "../config/config.ts";
+import { THEMES, THEME_NAMES, type ThemeColors } from "./themes.ts";
 
-  fg:           "#c0caf5",
-  fgDim:        "#565f89",
-  fgBright:     "#e0e6ff",
+// ── Mutable active theme ─────────────────────────────
 
-  accent:       "#7aa2f7",
-  accentAlt:    "#bb9af7",
+let _activeTheme: ThemeName = "tokyo-night";
 
-  green:        "#9ece6a",
-  yellow:       "#e0af68",
-  red:          "#f7768e",
-  orange:       "#ff9e64",
-  cyan:         "#7dcfff",
+export function setTheme(name: ThemeName): void {
+  _activeTheme = name;
+}
 
-  border:       "#3b4261",
-  borderFocus:  "#7aa2f7",
+export function getThemeName(): ThemeName {
+  return _activeTheme;
+}
 
-  priority: {
-    urgent:  "#f7768e",
-    high:    "#ff9e64",
-    medium:  "#e0af68",
-    low:     "#7dcfff",
-    none:    "#565f89",
+export function cycleTheme(): ThemeName {
+  const idx = THEME_NAMES.indexOf(_activeTheme);
+  const next = THEME_NAMES[(idx + 1) % THEME_NAMES.length]!;
+  _activeTheme = next;
+  return next;
+}
+
+// ── colors proxy: always reads from active theme ─────
+// This keeps all existing `colors.xxx` references working.
+
+export const colors: ThemeColors = new Proxy({} as ThemeColors, {
+  get(_target, prop: string) {
+    const theme = THEMES[_activeTheme];
+    return (theme as unknown as Record<string, unknown>)[prop];
   },
+});
 
-  status: {
-    todo:        "#565f89",
-    in_progress: "#e0af68",
-    done:        "#9ece6a",
-    archived:    "#3b4261",
-  },
-} as const;
+export { THEMES, THEME_NAMES };
+export type { ThemeColors };

@@ -2,7 +2,7 @@
 
 A fast, keyboard-driven task manager for the terminal. No browser, no Electron, no mouse required.
 
-![tsk — Task List view with detail panel](Screenshot%202026-02-19%20at%2012.34.37.png)
+![tsk — Task List view with detail panel](assets/screenshots/tsk-task-list.png)
 
 ## Why tsk
 
