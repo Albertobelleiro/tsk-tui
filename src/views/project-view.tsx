@@ -75,10 +75,26 @@ export function ProjectView({ store, tasks, pushModal, isModalOpen }: ProjectVie
     const selectedTask = col[idx] ?? null;
 
     switch (e.name) {
-      case "h": case "left":
+      case "h":
+        if (e.shift && selectedTask) {
+          const prev = PREV_STATUS[selectedTask.status];
+          if (prev) store.moveToStatus(selectedTask.id, prev);
+        } else {
+          setActiveCol((c) => Math.max(0, c - 1));
+        }
+        return;
+      case "left":
         setActiveCol((c) => Math.max(0, c - 1));
         return;
-      case "l": case "right":
+      case "l":
+        if (e.shift && selectedTask) {
+          const next = NEXT_STATUS[selectedTask.status];
+          if (next) store.moveToStatus(selectedTask.id, next);
+        } else {
+          setActiveCol((c) => Math.min(2, c + 1));
+        }
+        return;
+      case "right":
         setActiveCol((c) => Math.min(2, c + 1));
         return;
       case "j": case "down":
@@ -98,30 +114,9 @@ export function ProjectView({ store, tasks, pushModal, isModalOpen }: ProjectVie
       case "g":
         setColIndices((p) => {
           const n = [...p] as [number, number, number];
-          n[activeCol] = 0;
+          n[activeCol] = e.shift ? last : 0;
           return n;
         });
-        return;
-      case "G":
-        setColIndices((p) => {
-          const n = [...p] as [number, number, number];
-          n[activeCol] = last;
-          return n;
-        });
-        return;
-
-      // Move task to next/prev column
-      case "L":
-        if (selectedTask) {
-          const next = NEXT_STATUS[selectedTask.status];
-          if (next) store.moveToStatus(selectedTask.id, next);
-        }
-        return;
-      case "H":
-        if (selectedTask) {
-          const prev = PREV_STATUS[selectedTask.status];
-          if (prev) store.moveToStatus(selectedTask.id, prev);
-        }
         return;
 
       case "d":

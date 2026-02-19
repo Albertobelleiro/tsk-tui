@@ -97,7 +97,23 @@ export function CalendarView({ store, pushModal, isModalOpen }: CalendarViewProp
   useKeyboard((e) => {
     if (isModalOpen) return;
     switch (e.name) {
-      case "h": case "left":
+      case "h":
+        if (e.shift) {
+          goToMonth(viewYear, viewMonth - 1);
+        } else {
+          if (selectedDay <= 1) {
+            // Go to prev month last day
+            const pm = viewMonth - 1;
+            const py = pm < 0 ? viewYear - 1 : viewYear;
+            const pMonth = pm < 0 ? 11 : pm;
+            const pDays = getDaysInMonth(py, pMonth);
+            setViewYear(py); setViewMonth(pMonth); setSelectedDay(pDays);
+          } else {
+            setSelectedDay((d) => d - 1);
+          }
+        }
+        return;
+      case "left":
         if (selectedDay <= 1) {
           // Go to prev month last day
           const pm = viewMonth - 1;
@@ -109,7 +125,18 @@ export function CalendarView({ store, pushModal, isModalOpen }: CalendarViewProp
           setSelectedDay((d) => d - 1);
         }
         return;
-      case "l": case "right":
+      case "l":
+        if (e.shift) {
+          goToMonth(viewYear, viewMonth + 1);
+        } else {
+          if (selectedDay >= daysInMonth) {
+            goToMonth(viewYear, viewMonth + 1);
+          } else {
+            setSelectedDay((d) => d + 1);
+          }
+        }
+        return;
+      case "right":
         if (selectedDay >= daysInMonth) {
           goToMonth(viewYear, viewMonth + 1);
         } else {
@@ -139,12 +166,6 @@ export function CalendarView({ store, pushModal, isModalOpen }: CalendarViewProp
         } else {
           setSelectedDay((d) => d + 7);
         }
-        return;
-      case "H":
-        goToMonth(viewYear, viewMonth - 1);
-        return;
-      case "L":
-        goToMonth(viewYear, viewMonth + 1);
         return;
       case "t":
         setViewYear(now.getFullYear());

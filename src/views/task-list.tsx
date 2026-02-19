@@ -164,8 +164,11 @@ export function TaskListView({
             return next;
           });
           return;
-        case "V": // Select all visible
-          setVisualSet(new Set(flatTasks.map((_, i) => i)));
+        case "v":
+          if (e.shift) {
+            // Select all visible
+            setVisualSet(new Set(flatTasks.map((_, i) => i)));
+          }
           return;
         case "d": { // Mark all done
           const selected = [...visualSet].map((i) => flatTasks[i]).filter((t): t is Task => t != null);
@@ -206,20 +209,22 @@ export function TaskListView({
         }
         break;
       case "a":
-        // Add sibling: if selected is a subtask, new task gets same parentId
-        if (selectedTask && selectedTask.parentId) {
-          pushModal({ type: "add-subtask", parent: store.tasks.find(t => t.id === selectedTask.parentId)! });
+        if (e.shift) {
+          // Inline quick-add or add subtask
+          if (selectedTask && selectedTask.subtaskIds.length > 0) {
+            // Add subtask to selected parent
+            pushModal({ type: "add-subtask", parent: selectedTask });
+          } else {
+            setInlineAdd(true);
+            setInlineText("");
+          }
         } else {
-          pushModal({ type: "add" });
-        }
-        return;
-      case "A": // Inline quick-add or add subtask
-        if (selectedTask && selectedTask.subtaskIds.length > 0) {
-          // Add subtask to selected parent
-          pushModal({ type: "add-subtask", parent: selectedTask });
-        } else {
-          setInlineAdd(true);
-          setInlineText("");
+          // Add sibling: if selected is a subtask, new task gets same parentId
+          if (selectedTask && selectedTask.parentId) {
+            pushModal({ type: "add-subtask", parent: store.tasks.find(t => t.id === selectedTask.parentId)! });
+          } else {
+            pushModal({ type: "add" });
+          }
         }
         return;
       case "u":
@@ -271,24 +276,31 @@ export function TaskListView({
     // Navigation
     switch (e.name) {
       case "j":
+        if (e.shift) {
+          setSelectedIndex((i) => Math.min(i + 10, last));
+        } else {
+          setSelectedIndex((i) => Math.min(i + 1, last));
+        }
+        return;
       case "down":
         setSelectedIndex((i) => Math.min(i + 1, last));
         return;
       case "k":
+        if (e.shift) {
+          setSelectedIndex((i) => Math.max(i - 10, 0));
+        } else {
+          setSelectedIndex((i) => Math.max(i - 1, 0));
+        }
+        return;
       case "up":
         setSelectedIndex((i) => Math.max(i - 1, 0));
         return;
       case "g":
-        setSelectedIndex(0);
-        return;
-      case "G":
-        setSelectedIndex(last);
-        return;
-      case "J":
-        setSelectedIndex((i) => Math.min(i + 10, last));
-        return;
-      case "K":
-        setSelectedIndex((i) => Math.max(i - 10, 0));
+        if (e.shift) {
+          setSelectedIndex(last);
+        } else {
+          setSelectedIndex(0);
+        }
         return;
       case "tab":
         if (!isNarrow) setFocusPanel((p) => (p === "list" ? "detail" : "list"));
@@ -350,18 +362,22 @@ export function TaskListView({
         pushModal({ type: "edit", task: selectedTask });
         break;
       case "d":
-        if (selectedTask.recurrence) {
-          const next = store.completeRecurring(selectedTask.id);
-          if (next) showToast(`Next: ${next.dueDate}`, "info");
+        if (e.shift) {
+          pushModal({ type: "input-due-date", task: selectedTask });
         } else {
-          const wasDone = selectedTask.status === "done";
-          store.toggleDone(selectedTask.id);
-          // Check unblocked tasks
-          if (shouldNotifyUnblocked(wasDone, selectedTask.recurrence !== null)) {
-            const unblocked = store.getUnblockedTasks(selectedTask.id);
-            for (const uid of unblocked) {
-              const ut = store.tasks.find((t) => t.id === uid);
-              if (ut) showToast(`Unblocked: ${ut.title}`, "success");
+          if (selectedTask.recurrence) {
+            const next = store.completeRecurring(selectedTask.id);
+            if (next) showToast(`Next: ${next.dueDate}`, "info");
+          } else {
+            const wasDone = selectedTask.status === "done";
+            store.toggleDone(selectedTask.id);
+            // Check unblocked tasks
+            if (shouldNotifyUnblocked(wasDone, selectedTask.recurrence !== null)) {
+              const unblocked = store.getUnblockedTasks(selectedTask.id);
+              for (const uid of unblocked) {
+                const ut = store.tasks.find((t) => t.id === uid);
+                if (ut) showToast(`Unblocked: ${ut.title}`, "success");
+              }
             }
           }
         }
@@ -376,24 +392,22 @@ export function TaskListView({
         pushModal({ type: "select-project", task: selectedTask });
         break;
       case "t":
-        pushModal({ type: "select-tags", task: selectedTask });
-        break;
-      case "D":
-        pushModal({ type: "input-due-date", task: selectedTask });
+        if (e.shift) {
+          // Time tracking: toggle timer
+          if (store.activeTimerTaskId === selectedTask.id) {
+            const elapsed = store.stopTimer();
+            showToast(`Timer stopped: ${elapsed}m logged`, "success");
+          } else {
+            store.startTimer(selectedTask.id);
+            showToast(`Timer started for "${selectedTask.title}"`, "info");
+          }
+        } else {
+          pushModal({ type: "select-tags", task: selectedTask });
+        }
         break;
       case "n": // Notes — use edit modal for now
         // Could open a notes panel; for v0.2 we use a simple toast
         showToast(`${selectedTask.notes.length} notes — press 'e' to edit`, "info");
-        break;
-      case "T":
-        // Time tracking: toggle timer
-        if (store.activeTimerTaskId === selectedTask.id) {
-          const elapsed = store.stopTimer();
-          showToast(`Timer stopped: ${elapsed}m logged`, "success");
-        } else {
-          store.startTimer(selectedTask.id);
-          showToast(`Timer started for "${selectedTask.title}"`, "info");
-        }
         break;
     }
   });
