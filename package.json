@@ -1,12 +1,30 @@
 {
   "name": "tsk",
-  "module": "index.ts",
+  "version": "0.1.0",
   "type": "module",
   "private": true,
+  "bin": {
+    "tsk": "./bin/tsk.tsx"
+  },
+  "scripts": {
+    "dev": "bun run --watch bin/tsk.tsx",
+    "start": "bun run bin/tsk.tsx",
+    "typecheck": "tsc --noEmit",
+    "build": "bun build --compile bin/tsk.tsx --outfile dist/tsk",
+    "build:all": "bun run build:darwin-arm64 && bun run build:darwin-x64 && bun run build:linux-x64 && bun run build:linux-arm64",
+    "build:darwin-arm64": "bun build --compile --target=bun-darwin-arm64 bin/tsk.tsx --outfile dist/tsk-darwin-arm64",
+    "build:darwin-x64": "bun build --compile --target=bun-darwin-x64 bin/tsk.tsx --outfile dist/tsk-darwin-x64",
+    "build:linux-x64": "bun build --compile --target=bun-linux-x64 bin/tsk.tsx --outfile dist/tsk-linux-x64",
+    "build:linux-arm64": "bun build --compile --target=bun-linux-arm64 bin/tsk.tsx --outfile dist/tsk-linux-arm64"
+  },
   "devDependencies": {
     "@types/bun": "latest"
   },
   "peerDependencies": {
     "typescript": "^5"
+  },
+  "dependencies": {
+    "@opentui/core": "0.1.80",
+    "@opentui/react": "^0.1.80"
   }
 }

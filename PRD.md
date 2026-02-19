@@ -114,28 +114,210 @@ tsk/
 
 ---
 
-## 3. Installation & Launch Commands
+## 3. Installation
+
+### 3.1 Via package manager (requires Bun or Node)
 
 ```bash
-# Install globally
+# Bun (recommended)
 bun install -g tsk
 
-# Launch (two aliases)
-tsk
-
-# Or run from source during development
-bun run bin/tsk.ts
+# npm
+npm install -g tsk
 ```
 
-The entry point (`bin/tsk.ts`) must:
-1. Initialize the `CliRenderer` with `useAlternateScreen: true` and `exitOnCtrlC: true`
-2. Load tasks from `~/.tsk/tasks.json` (create dir + file if missing)
-3. Render `<App />` via `createRoot(renderer).render(<App />)`
-4. Call `renderer.start()`
+### 3.2 Via curl (standalone binary, no runtime needed)
+
+```bash
+# macOS / Linux
+curl -fsSL https://github.com/Albertobelleiro/tsk-tui/releases/latest/download/install.sh | sh
+
+# Or download manually from GitHub Releases
+# https://github.com/Albertobelleiro/tsk-tui/releases
+```
+
+### 3.3 One-shot without installing
+
+```bash
+# Bun
+bunx tsk
+
+# npm
+npx tsk
+```
+
+### 3.4 From source (development)
+
+```bash
+git clone https://github.com/Albertobelleiro/tsk-tui.git
+cd tsk-tui
+bun install
+bun run dev          # watch mode
+bun run bin/tsk.ts   # single run
+```
+
+### 3.5 Build standalone binary
+
+```bash
+bun run build        # outputs ./dist/tsk (single executable)
+```
+
+Uses `bun build --compile` to produce a self-contained binary with no runtime dependency.
 
 ---
 
-## 4. Data Model
+## 3B. Distribution
+
+| Channel | Artifact | Runtime needed |
+|---------|----------|----------------|
+| `bun install -g` | Source package | Bun |
+| `npm install -g` | Source package | Node ≥ 20 |
+| `bunx` / `npx` | Ephemeral run | Bun / Node |
+| GitHub Releases | Compiled binary | None |
+| `curl \| sh` | Compiled binary | None |
+
+Binary targets (built via CI on each release tag):
+- `tsk-darwin-arm64` (macOS Apple Silicon)
+- `tsk-darwin-x64` (macOS Intel)
+- `tsk-linux-x64` (Linux x64)
+- `tsk-linux-arm64` (Linux ARM)
+
+---
+
+## 4. CLI Interface
+
+### 4.1 No args → TUI mode
+
+```bash
+tsk                  # Opens the interactive terminal UI
+```
+
+### 4.2 Flags (work in any context)
+
+| Flag | Short | Description |
+|------|-------|-------------|
+| `--help` | `-h` | Show help and available commands |
+| `--version` | `-v` | Print version number |
+| `--data-dir <path>` | | Use custom data directory (default: `~/.tsk`) |
+| `--no-color` | | Disable color output (respects `NO_COLOR` env too) |
+
+### 4.3 Task commands (headless, no TUI)
+
+```bash
+# Add
+tsk add "Buy groceries"
+tsk add "Fix login bug" -p high -P dev --tag backend --due 2026-02-25
+
+# List
+tsk list                          # All non-archived tasks
+tsk list --status todo            # Filter by status
+tsk list --priority high,urgent   # Filter by priority
+tsk list --project dev            # Filter by project
+tsk list --tag backend            # Filter by tag
+tsk list --due today              # Due today
+tsk list --due overdue            # Past due
+tsk list --sort priority          # Sort: priority|due|created|title
+tsk list --json                   # Output as JSON (for piping)
+
+# Show detail
+tsk show <id>                     # Full task detail (accepts partial ID)
+
+# Update
+tsk edit <id> --title "New title"
+tsk edit <id> --priority high
+tsk edit <id> --project dev
+tsk edit <id> --tag backend,auth
+tsk edit <id> --due 2026-03-01
+tsk edit <id> --desc "New description"
+
+# Status transitions
+tsk done <id>                     # Mark as done (toggle: done ↔ todo)
+tsk start <id>                    # Set status to in_progress
+tsk archive <id>                  # Set status to archived
+
+# Delete
+tsk rm <id>                       # Delete task (asks confirmation)
+tsk rm <id> --force               # Delete without confirmation
+
+# Bulk
+tsk done --all --project dev      # Mark all dev tasks as done
+tsk rm --all --status archived    # Remove all archived tasks
+
+# Search
+tsk search "login"                # Fuzzy search title + description
+
+# Projects & tags
+tsk projects                      # List all projects with task counts
+tsk tags                          # List all tags with task counts
+```
+
+### 4.4 CLI add flags
+
+| Flag | Short | Default | Description |
+|------|-------|---------|-------------|
+| `--priority` | `-p` | `none` | `none\|low\|medium\|high\|urgent` |
+| `--project` | `-P` | `null` | Project name |
+| `--tag` | `-t` | `[]` | Comma-separated tags |
+| `--due` | `-d` | `null` | Due date: `YYYY-MM-DD`, `today`, `tomorrow`, `monday`, etc. |
+| `--desc` | | `""` | Description text |
+| `--status` | `-s` | `todo` | Initial status |
+
+### 4.5 ID resolution
+
+Task IDs are UUIDs but commands accept **partial prefixes**:
+
+```bash
+tsk done a1b2       # Matches a1b2c3d4-... if unique
+tsk show a1         # Error if multiple tasks start with "a1"
+```
+
+### 4.6 Exit codes
+
+| Code | Meaning |
+|------|---------|
+| `0` | Success |
+| `1` | General error |
+| `2` | Task not found |
+| `3` | Ambiguous ID (partial matches multiple tasks) |
+| `4` | Validation error (missing title, bad date, etc.) |
+
+### 4.7 Output format
+
+- Default: human-readable, colored table
+- `--json`: machine-readable JSON to stdout
+- `--no-color`: plain text (also respects `NO_COLOR` env)
+
+```bash
+# Human output
+$ tsk list
+  ID       Status   Pri   Title              Project   Due
+  a1b2...  ● todo   high  Fix login bug      dev       Feb 25
+  c3d4...  ◉ prog   med   Write docs         —         —
+  e5f6...  ✓ done   low   Deploy v2.1        dev       —
+
+# JSON output
+$ tsk list --json
+[{"id":"a1b2...","title":"Fix login bug",...}]
+
+# Pipe-friendly
+$ tsk list --json | jq '.[].title'
+```
+
+---
+
+## 5. Entry Point
+
+The entry point (`bin/tsk.ts`) must:
+1. Parse CLI args — if a subcommand is present (`add`, `list`, `done`, etc.), run it headless and exit
+2. If no subcommand → launch TUI:
+   a. Initialize the `CliRenderer` with `useAlternateScreen: true` and `exitOnCtrlC: true`
+   b. Load tasks from `~/.tsk/tasks.json` (create dir + file if missing)
+   c. Render `<App />` via `createRoot(renderer).render(<App />)`
+   d. Call `renderer.start()`
+
+---
+
+## 6. Data Model
 
 ### Task
 
@@ -190,7 +372,7 @@ interface FilterState {
 
 ---
 
-## 5. Color Theme
+## 7. Color Theme
 
 ```typescript
 // theme/colors.ts — Tokyo Night inspired palette
@@ -237,7 +419,7 @@ const colors = {
 
 ---
 
-## 6. Views & Layouts
+## 8. Views & Layouts
 
 ### 6.1 Main Layout (Shared Shell)
 
@@ -391,7 +573,7 @@ Full-screen overlay showing all keybindings organized by context:
 
 ---
 
-## 7. Keyboard Controls (Complete Keymap)
+## 9. Keyboard Controls (Complete Keymap)
 
 ### 7.1 Global Keys (Work in every view, every mode)
 
@@ -463,7 +645,7 @@ Full-screen overlay showing all keybindings organized by context:
 
 ---
 
-## 8. Modals
+## 10. Modals
 
 All modals render as centered overlays on top of the current view. They use a stack-based system — opening a modal pushes to `modalStack`, closing pops.
 
@@ -553,7 +735,7 @@ All modals render as centered overlays on top of the current view. They use a st
 
 ---
 
-## 9. Interaction Flows
+## 11. Interaction Flows
 
 ### 9.1 Adding a Task
 
@@ -601,7 +783,7 @@ All modals render as centered overlays on top of the current view. They use a st
 
 ---
 
-## 10. State Management
+## 12. State Management
 
 ### Task Store (`store/task-store.ts`)
 
@@ -650,7 +832,7 @@ interface TaskStore {
 
 ---
 
-## 11. Animations & Visual Polish
+## 13. Animations & Visual Polish
 
 Use OpenTUI's `useTimeline` hook for subtle animations:
 
@@ -673,7 +855,7 @@ Keep all animations under 200ms — terminal UIs must feel instant.
 
 ---
 
-## 12. Edge Cases & Error Handling
+## 14. Edge Cases & Error Handling
 
 | Scenario | Behavior |
 |----------|----------|
@@ -689,7 +871,7 @@ Keep all animations under 200ms — terminal UIs must feel instant.
 
 ---
 
-## 13. Implementation Order
+## 15. Implementation Order
 
 Build in this exact sequence to have a working app at every step:
 
@@ -747,7 +929,7 @@ Build in this exact sequence to have a working app at every step:
 
 ---
 
-## 14. Key Technical Decisions for the Builder
+## 16. Key Technical Decisions for the Builder
 
 1. **Use `@opentui/react` (not core imperative API)** — React's declarative model with hooks (`useState`, `useEffect`, `useKeyboard`) is cleaner for managing complex UI state like modals, filters, and view switching.
 
@@ -771,7 +953,7 @@ Build in this exact sequence to have a working app at every step:
 
 ---
 
-## 15. Acceptance Criteria
+## 17. Acceptance Criteria
 
 The app is considered complete when:
 
