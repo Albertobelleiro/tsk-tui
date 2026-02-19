@@ -97,7 +97,7 @@ export function TaskRow({
   // Collapse indicator for parent tasks
   const collapseIcon = hasChildren
     ? (isCollapsed ? "▸ " : "▾ ")
-    : (depth === 0 ? "  " : "");
+    : "  ";
 
   // Progress suffix
   const progressStr = progress && progress.total > 0

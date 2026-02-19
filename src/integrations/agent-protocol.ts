@@ -1,4 +1,4 @@
-import type { Task, TaskPriority } from "../store/types.ts";
+import type { Task, TaskPriority, TaskStatus } from "../store/types.ts";
 
 // ── Command types ─────────────────────────────────────
 
@@ -51,7 +51,7 @@ export interface CreateSubtaskPayload {
 export interface BulkCreatePayload {
   tasks: Array<{
     title: string;
-    priority?: string;
+    priority?: TaskPriority;
     project?: string;
     tags?: string[];
     dueDate?: string;
@@ -62,8 +62,8 @@ export interface UpdatePayload {
   taskId: string;
   title?: string;
   description?: string;
-  priority?: string;
-  status?: string;
+  priority?: TaskPriority;
+  status?: TaskStatus;
   project?: string;
   tags?: string[];
   dueDate?: string;

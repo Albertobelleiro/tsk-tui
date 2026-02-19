@@ -16,6 +16,8 @@ interface StatusBarProps {
   visualCount?: number;
   persistenceError?: string | null;
   hasPendingSave?: boolean;
+  lastSyncTime?: string | null;
+  syncError?: string | null;
 }
 
 export function StatusBar({
@@ -33,6 +35,8 @@ export function StatusBar({
   visualCount = 0,
   persistenceError = null,
   hasPendingSave = false,
+  lastSyncTime = null,
+  syncError = null,
 }: StatusBarProps) {
   const [clock, setClock] = useState(formatClock());
 
@@ -94,6 +98,17 @@ export function StatusBar({
           <text content={` ⏱ ${timerText} `} fg={colors.yellow} attributes={1} />
         </>
       ) : null}
+      {syncError ? (
+        <>
+          <text content="│" fg={colors.border} />
+          <text content={` Sync error: ${syncError} `} fg={colors.red} attributes={1} />
+        </>
+      ) : lastSyncTime ? (
+        <>
+          <text content="│" fg={colors.border} />
+          <text content={` Synced: ${formatRelativeTime(lastSyncTime)} `} fg={colors.green} />
+        </>
+      ) : null}
       {hasPendingSave ? (
         <>
           <text content="│" fg={colors.border} />
@@ -124,4 +139,18 @@ export function StatusBar({
 function formatClock(): string {
   const now = new Date();
   return `${String(now.getHours()).padStart(2, "0")}:${String(now.getMinutes()).padStart(2, "0")}`;
+}
+
+function formatRelativeTime(isoTimestamp: string): string {
+  const now = Date.now();
+  const then = new Date(isoTimestamp).getTime();
+  const diffMs = now - then;
+  const diffMins = Math.floor(diffMs / 60000);
+  const diffHours = Math.floor(diffMins / 60);
+  const diffDays = Math.floor(diffHours / 24);
+
+  if (diffMins < 1) return "just now";
+  if (diffMins < 60) return `${diffMins}m ago`;
+  if (diffHours < 24) return `${diffHours}h ago`;
+  return `${diffDays}d ago`;
 }

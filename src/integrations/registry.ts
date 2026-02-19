@@ -10,15 +10,17 @@ import type { SyncProvider } from "./types.ts";
 
 type ProviderFactory = () => Promise<SyncProvider>;
 
-const PROVIDER_FACTORIES: Partial<Record<ExternalSource, ProviderFactory>> = {
+const PROVIDER_FACTORIES: Partial<Record<string, ProviderFactory>> = {
   todoist: () => import("./todoist.ts").then((m) => m.createTodoistProvider()),
   linear: () => import("./linear.ts").then((m) => m.createLinearProvider()),
-  // asana, github-issues registered in future sessions
+  asana: () => import("./asana.ts").then((m) => m.createAsanaProvider()),
+  "github-issues": () => import("./github-issues.ts").then((m) => m.createGitHubIssuesProvider()),
 };
 
 /**
- * Return a connected provider instance for `name`, or null if not configured.
- * Throws if the provider is registered but its config is missing.
+ * Return a connected provider instance for `name`, or null if not configured
+ * or on error (including missing config). Uses PROVIDER_FACTORIES to lazily
+ * instantiate providers and calls provider.isConnected() to verify credentials.
  */
 export async function getProvider(name: ExternalSource): Promise<SyncProvider | null> {
   const factory = PROVIDER_FACTORIES[name];

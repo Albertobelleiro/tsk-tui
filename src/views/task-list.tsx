@@ -92,13 +92,16 @@ export function TaskListView({
   // Build tree-ordered list
   const allTreeItems = store.getFilteredTree(filter);
 
+  // Build task index for O(1) parent lookups
+  const taskIndex = new Map(store.tasks.map(t => [t.id, t]));
+
   // Filter out children of collapsed parents
   const treeItems = allTreeItems.filter(item => {
     if (item.depth === 0) return true;
     let current = item.task;
     while (current.parentId) {
       if (collapsed.has(current.parentId)) return false;
-      const parent = store.tasks.find(t => t.id === current.parentId);
+      const parent = taskIndex.get(current.parentId);
       if (!parent || parent.id === current.id) break;
       current = parent;
     }
@@ -211,7 +214,7 @@ export function TaskListView({
         }
         return;
       case "A": // Inline quick-add or add subtask
-        if (selectedTask && selectedTask.subtaskIds.length >= 0) {
+        if (selectedTask && selectedTask.subtaskIds.length > 0) {
           // Add subtask to selected parent
           pushModal({ type: "add-subtask", parent: selectedTask });
         } else {
@@ -459,12 +462,18 @@ export function TaskListView({
               // Walk through prior items to find ancestors
               for (let d = item.depth - 1; d >= 1; d--) {
                 // Find the ancestor at this depth by scanning backwards
+                let found = false;
                 for (let j = i - 1; j >= 0; j--) {
                   if (treeItems[j]!.depth === d) {
                     stack.unshift(treeItems[j]!.isLast);
+                    found = true;
                     break;
                   }
                   if (treeItems[j]!.depth < d) break;
+                }
+                // If no ancestor found at this depth, treat as "is last" to avoid undefined
+                if (!found) {
+                  stack.unshift(true);
                 }
               }
               ancestorIsLast.push(...stack);

@@ -1630,7 +1630,7 @@ const HELP_AGENT = `Usage: tsk agent <subcommand>
 
 Subcommands:
   start          Start agent bridge (foreground, Ctrl+C to stop)
-  stop           Clear agent inbox/outbox
+  clear-inbox    Clear agent inbox
   status         Show bridge configuration status
   send <json>    Send a command (writes to inbox, waits for response)
   outbox         Show last 10 responses
@@ -1651,14 +1651,14 @@ async function cmdAgent(args: string[]): Promise<number> {
 
   switch (sub) {
     case "start": return await cmdAgentStart();
-    case "stop": return cmdAgentStop();
+    case "clear-inbox": return cmdAgentClearInbox();
     case "status": return await cmdAgentStatus();
     case "send": return await cmdAgentSend(pos.slice(1).join(" ") || "");
     case "outbox": return await cmdAgentOutbox();
     case "clear": return await cmdAgentClear();
     case "snippet": return cmdAgentSnippet();
     default:
-      error("Usage: tsk agent <start|stop|status|send|outbox|clear|snippet>");
+      error("Usage: tsk agent <start|clear-inbox|status|send|outbox|clear|snippet>");
       return EXIT_VALIDATION;
   }
 }
@@ -1694,7 +1694,7 @@ async function cmdAgentStart(): Promise<number> {
   return EXIT_OK;
 }
 
-function cmdAgentStop(): number {
+function cmdAgentClearInbox(): number {
   try {
     Bun.write(AgentBridge.inboxPath, "[]");
   } catch { /* ignore */ }
@@ -1836,7 +1836,7 @@ async function cmdAgentOutbox(): Promise<number> {
       const ts = r.timestamp ? dim(r.timestamp.slice(11, 19)) : "";
       const id = dim(r.commandId?.slice(0, 8) ?? "?");
       const msg = r.status === "ok"
-        ? dim(JSON.stringify(r.data).slice(0, 60))
+        ? dim(String(r.data ?? "").slice(0, 60))
         : red(r.error ?? "error");
       console.log(`  ${icon} ${ts} ${id}  ${msg}`);
     }

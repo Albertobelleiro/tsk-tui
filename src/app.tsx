@@ -4,7 +4,7 @@ import type { TaskStore } from "./store/task-store.ts";
 import type { Task, TaskPriority, FilterState } from "./store/types.ts";
 import { DEFAULT_FILTER } from "./store/types.ts";
 import { colors, cycleTheme, getThemeName } from "./theme/colors.ts";
-import { Header, type View } from "./components/header.tsx";
+import { Header, type View, type SyncStatusMap } from "./components/header.tsx";
 import { StatusBar } from "./components/status-bar.tsx";
 import { ToastContainer, showToast } from "./components/toast.tsx";
 import { TaskListView } from "./views/task-list.tsx";
@@ -17,6 +17,9 @@ import { ConfirmModal } from "./components/confirm-modal.tsx";
 import { SelectModal } from "./components/select-modal.tsx";
 import { AgentBridge } from "./integrations/agent-bridge.ts";
 import { loadConfig } from "./config/config.ts";
+import { SyncEngine } from "./integrations/sync-engine.ts";
+import { SyncStateManager } from "./integrations/sync-state.ts";
+import { getConnectedProviders } from "./integrations/registry.ts";
 
 type ModalType =
   | { type: "add" }
@@ -88,6 +91,10 @@ export function App({ store }: AppProps) {
     ? formatTimer(Date.now() - store.activeTimerStart)
     : null;
 
+  // Sync status state
+  const [syncStatus, setSyncStatus] = useState<SyncStatusMap>({});
+  const [lastSyncTime, setLastSyncTime] = useState<string | null>(null);
+
   // Agent bridge auto-start/stop
   const [agentActive, setAgentActive] = useState(false);
   const bridgeRef = useRef<AgentBridge | null>(null);
@@ -106,7 +113,9 @@ export function App({ store }: AppProps) {
         if (cancelled) { bridge.stop(); return; }
         bridgeRef.current = bridge;
         setAgentActive(true);
-      } catch { /* agent bridge is optional */ }
+      } catch (err) {
+        console.error("AgentBridge start failed:", err);
+      }
     })();
     return () => {
       cancelled = true;
@@ -115,6 +124,70 @@ export function App({ store }: AppProps) {
       setAgentActive(false);
     };
   }, [store]);
+
+  // Auto-sync background loop
+  useEffect(() => {
+    let cancelled = false;
+
+    const runSync = async () => {
+      try {
+        const config = await loadConfig();
+        if (!config.sync.autoSyncEnabled) return;
+
+        const providers = await getConnectedProviders();
+        if (providers.length === 0) return;
+
+        for (const provider of providers) {
+          setSyncStatus((prev) => ({ ...prev, [provider.name]: { status: "syncing" } }));
+
+          try {
+            const syncState = await SyncStateManager.load();
+            const engine = new SyncEngine(store, provider, syncState, config.sync);
+            const result = await engine.sync();
+
+            setSyncStatus((prev) => ({
+              ...prev,
+              [provider.name]: {
+                status: result.errors.length > 0 ? "error" : "success",
+                lastSync: result.timestamp,
+                error: result.errors[0]?.message,
+              },
+            }));
+            setLastSyncTime(result.timestamp);
+
+            if (result.pulled > 0 || result.pushed > 0) {
+              showToast(`${capitalizeFirst(provider.name)}: ${result.pulled} pulled, ${result.pushed} pushed`, "info");
+            }
+          } catch (e) {
+            setSyncStatus((prev) => ({
+              ...prev,
+              [provider.name]: { status: "error", error: e instanceof Error ? e.message : "Sync failed" },
+            }));
+          }
+        }
+      } catch { /* sync errors handled per-provider */ }
+    };
+
+    (async () => {
+      const config = await loadConfig();
+      if (config.sync.syncOnStartup && !cancelled) {
+        await runSync();
+      }
+    })();
+
+    const syncInterval = setInterval(() => {
+      if (!cancelled) {
+        void runSync();
+      }
+    }, 5 * 60 * 1000); // Default 5 min, use config value in production
+
+    return () => {
+      cancelled = true;
+      clearInterval(syncInterval);
+    };
+  }, [store]);
+
+  const capitalizeFirst = (s: string): string => s.charAt(0).toUpperCase() + s.slice(1);
 
   const pushModal = useCallback((modal: ModalType) => {
     setModalStack((s) => [...s, modal]);
@@ -131,11 +204,39 @@ export function App({ store }: AppProps) {
   }, []);
 
   useKeyboard((e) => {
-    // Ctrl+S force save
+    // Ctrl+S force save + sync
     if (e.name === "s" && e.ctrl) {
-      void store.save()
-        .then(() => showToast("Saved!", "success"))
-        .catch((err) => showToast(`Save failed: ${String(err)}`, "error"));
+      const doSave = async () => {
+        try {
+          await store.save();
+          const config = await loadConfig();
+          const providers = await getConnectedProviders();
+          if (providers.length > 0) {
+            showToast("Saving & syncing...", "info");
+            for (const provider of providers) {
+              setSyncStatus((prev) => ({ ...prev, [provider.name]: { status: "syncing" } }));
+              try {
+                const syncState = await SyncStateManager.load();
+                const engine = new SyncEngine(store, provider, syncState, config.sync);
+                const result = await engine.sync();
+                setSyncStatus((prev) => ({
+                  ...prev,
+                  [provider.name]: { status: "success", lastSync: result.timestamp },
+                }));
+                setLastSyncTime(result.timestamp);
+                showToast(`${capitalizeFirst(provider.name)}: ${result.pulled} pulled, ${result.pushed} pushed`, "info");
+              } catch {
+                setSyncStatus((prev) => ({ ...prev, [provider.name]: { status: "error" } }));
+              }
+            }
+          } else {
+            showToast("Saved!", "success");
+          }
+        } catch (err) {
+          showToast(`Save failed: ${String(err)}`, "error");
+        }
+      };
+      void doSave();
       return;
     }
     // Ctrl+T cycle theme
@@ -205,6 +306,7 @@ export function App({ store }: AppProps) {
         onViewChange={setActiveView}
         timerActive={store.activeTimerTaskId !== null}
         agentActive={agentActive}
+        syncStatus={syncStatus}
       />
 
       {activeView === "list" ? (
@@ -249,6 +351,7 @@ export function App({ store }: AppProps) {
           visualCount={visualCount}
           persistenceError={store.persistenceError}
           hasPendingSave={store.hasPendingSave}
+          lastSyncTime={lastSyncTime}
         />
       )}
 

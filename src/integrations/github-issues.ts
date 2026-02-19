@@ -62,6 +62,7 @@ const PRIORITY_LABEL_SET = new Set(
 // --- Due date via HTML comment ---
 
 const DUE_DATE_RE = /<!-- tsk:due:(\d{4}-\d{2}-\d{2}) -->/;
+const DUE_DATE_RE_GLOBAL = /<!-- tsk:due:(\d{4}-\d{2}-\d{2}) -->/g;
 
 function extractDueDate(body: string | undefined): string | undefined {
   if (!body) return undefined;
@@ -70,7 +71,7 @@ function extractDueDate(body: string | undefined): string | undefined {
 }
 
 function injectDueDate(body: string, dueDate: string | null | undefined): string {
-  const cleaned = body.replace(DUE_DATE_RE, "").trimEnd();
+  const cleaned = body.replace(DUE_DATE_RE_GLOBAL, "").trimEnd();
   if (!dueDate) return cleaned;
   return `${cleaned}\n<!-- tsk:due:${dueDate} -->`;
 }
@@ -391,9 +392,24 @@ export class GitHubIssuesProvider implements SyncProvider {
     if (!(await this.isConnected())) return null;
     await this.ensurePriorityLabels();
 
+    let priorityKey: TaskPriority | undefined;
+    if (typeof task.priority === "number") {
+      priorityKey = numericToTaskPriority(task.priority);
+    } else if (task.priority) {
+      priorityKey = task.priority;
+    }
+
     const { priority, tags } = separateLabels(task.labels ?? []);
-    const priorityLabel = PRIORITY_LABELS[priority];
-    const allLabels = [...tags, ...(priorityLabel ? [priorityLabel] : [])];
+    let allLabels = [...tags];
+    if (priorityKey) {
+      const priorityLabel = PRIORITY_LABELS[priorityKey];
+      if (priorityLabel && !allLabels.includes(priorityLabel)) {
+        allLabels.push(priorityLabel);
+      }
+    } else if (priority) {
+      const priorityLabel = PRIORITY_LABELS[priority];
+      if (priorityLabel) allLabels.push(priorityLabel);
+    }
 
     let body = task.description ?? "";
     body = injectDueDate(body, task.dueDate);
@@ -453,10 +469,18 @@ export class GitHubIssuesProvider implements SyncProvider {
     }
 
     // Handle body: inject due date if changed
-    if (updates.description !== undefined || updates.dueDate !== undefined) {
-      let body = updates.description ?? "";
+    if (updates.description !== undefined) {
+      let body = updates.description;
       body = injectDueDate(body, updates.dueDate);
       payload.body = body;
+    } else if (updates.dueDate !== undefined) {
+      // Only update due date, preserve existing body by fetching current issue
+      const current = await ghFetch<GitHubIssue>(
+        this.repoUrl(`/issues/${externalId}`),
+        { headers: this.authHeaders() },
+      );
+      const currentBody = "error" in current ? "" : (current.data.body ?? "");
+      payload.body = injectDueDate(currentBody, updates.dueDate);
     }
 
     if (Object.keys(payload).length === 0) return null;
@@ -676,3 +700,22 @@ function numericToTaskPriority(priority: number): TaskPriority {
 // --- Exported utilities for CLI connect flow ---
 
 export { parseTaskList, generateSubtaskList, parseLinkHeader };
+
+// ── Factory ───────────────────────────────────────────────────────────────────
+
+export function createGitHubIssuesProvider(): Promise<SyncProvider> {
+  return import("../config/config.ts").then(async ({ ConfigManager }) => {
+    const cfg = await ConfigManager.getIntegration("github") as {
+      repo?: string;
+      accessToken?: string;
+      useGhCli?: boolean;
+      labelFilter?: string[];
+    } | null;
+    if (!cfg?.repo) throw new Error("GitHub Issues not connected — run: tsk connect github-issues");
+    return new GitHubIssuesProvider(cfg.repo, {
+      accessToken: cfg.accessToken,
+      useGhCli: cfg.useGhCli,
+      labelFilter: cfg.labelFilter,
+    });
+  });
+}

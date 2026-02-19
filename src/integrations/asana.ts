@@ -121,25 +121,30 @@ export async function ensureValidToken(config: AsanaConfig): Promise<string> {
     return config.accessToken;
   }
 
-  const result = await refreshAccessToken({
-    tokenUrl: "https://app.asana.com/-/oauth_token",
-    refreshToken: config.refreshToken,
-    clientId,
-    clientSecret: clientSecret || undefined,
-  });
+  try {
+    const result = await refreshAccessToken({
+      tokenUrl: "https://app.asana.com/-/oauth_token",
+      refreshToken: config.refreshToken,
+      clientId,
+      clientSecret: clientSecret || undefined,
+    });
 
-  const updated: AsanaConfig = {
-    ...config,
-    accessToken: result.access_token,
-    refreshToken: result.refresh_token ?? config.refreshToken,
-    tokenExpiresAt: new Date(
-      Date.now() + (result.expires_in ?? 3600) * 1000,
-    ).toISOString(),
-  };
+    const updated: AsanaConfig = {
+      ...config,
+      accessToken: result.access_token,
+      refreshToken: result.refresh_token ?? config.refreshToken,
+      tokenExpiresAt: new Date(
+        Date.now() + (result.expires_in ?? 3600) * 1000,
+      ).toISOString(),
+    };
 
-  await ConfigManager.setIntegration("asana", updated);
+    await ConfigManager.setIntegration("asana", updated);
 
-  return result.access_token;
+    return result.access_token;
+  } catch (err) {
+    console.error("Failed to refresh Asana token:", err);
+    return config.accessToken;
+  }
 }
 
 // ---------------------------------------------------------------------------
@@ -243,7 +248,10 @@ export class AsanaProvider implements SyncProvider {
         headers: this.headers(),
       });
 
-      if ("error" in res) break;
+      if ("error" in res) {
+        console.error(`[Asana] Pagination error at offset ${offset}:`, res.error);
+        throw new Error(`Asana API error: ${JSON.stringify(res.error)}`);
+      }
       const page = res.data;
       if (page.data) results.push(...page.data);
 
@@ -261,9 +269,14 @@ export class AsanaProvider implements SyncProvider {
   ): Promise<ExternalTask[]> {
     if (!this.projectId) return [];
 
+    const params: Record<string, string> = { opt_fields: TASK_OPT_FIELDS };
+    if (_options?.updatedSince) {
+      params.modified_since = _options.updatedSince;
+    }
+
     const tasks = await this.fetchPaginated<AsanaTask>(
       `${API_BASE}/projects/${this.projectId}/tasks`,
-      { opt_fields: TASK_OPT_FIELDS },
+      params,
     );
 
     return tasks.map((t) => this.mapAsanaTask(t));
@@ -390,17 +403,28 @@ export class AsanaProvider implements SyncProvider {
 
     const result: ExternalTask[] = [];
 
-    for (const task of tasks) {
+    // Map tasks to their mapped results and nested fetch promises
+    const taskPromises = tasks.map(async (task) => {
       const mapped = this.mapAsanaTask(task);
-      result.push(mapped);
 
       // Recurse into nested subtasks up to MAX_SUBTASK_DEPTH
+      let nested: ExternalTask[] = [];
       if (depth < MAX_SUBTASK_DEPTH) {
-        const nested = await this.fetchSubtasksRecursive(task.gid, depth + 1);
-        if (nested.length > 0) {
-          mapped.subtaskExternalIds = nested.map((n) => n.externalId);
-          result.push(...nested);
-        }
+        nested = await this.fetchSubtasksRecursive(task.gid, depth + 1);
+      }
+
+      return { mapped, nested };
+    });
+
+    // Fetch all siblings in parallel
+    const taskResults = await Promise.all(taskPromises);
+
+    // Process results
+    for (const { mapped, nested } of taskResults) {
+      result.push(mapped);
+      if (nested.length > 0) {
+        mapped.subtaskExternalIds = nested.map((n) => n.externalId);
+        result.push(...nested);
       }
     }
 
@@ -614,7 +638,7 @@ export class AsanaProvider implements SyncProvider {
       dueDate: task.dueDate ?? undefined,
       updatedAt: task.updatedAt,
       completedAt: task.completedAt,
-      parentExternalId: task.parentId ?? null,
+      parentExternalId: null,
     };
   }
 
@@ -640,4 +664,14 @@ export class AsanaProvider implements SyncProvider {
       url: task.permalink_url,
     };
   }
+}
+
+// ── Factory ───────────────────────────────────────────────────────────────────
+
+export function createAsanaProvider(): Promise<SyncProvider> {
+  return import("../config/config.ts").then(async ({ ConfigManager }) => {
+    const cfg = await ConfigManager.getIntegration("asana");
+    if (!cfg?.accessToken) throw new Error("Asana not connected — run: tsk connect asana");
+    return new AsanaProvider(cfg.accessToken, cfg.workspaceId, cfg.projectId);
+  });
 }

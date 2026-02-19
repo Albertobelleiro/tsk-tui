@@ -81,7 +81,7 @@ export class AgentBridge {
       try {
         await this.processInbox();
       } catch (e) {
-        // Silently handle poll errors — don't crash
+        console.error(`[AgentBridge] Poll error at ${new Date().toISOString()}:`, e);
       }
     }, this._pollIntervalMs);
 
@@ -443,6 +443,14 @@ export class AgentBridge {
   }
 
   private _handleStopTimer(cmd: AgentCommand): AgentResponse {
+    const p = cmd.payload as unknown as TaskIdPayload;
+    const requestedTaskId = p.taskId ? String(p.taskId) : null;
+    const runningTaskId = this._store.activeTimerTaskId;
+
+    if (requestedTaskId && requestedTaskId !== runningTaskId) {
+      return this._error(cmd.id, `Timer not running for task ${requestedTaskId} (running: ${runningTaskId ?? "none"})`);
+    }
+
     const elapsed = this._store.stopTimer();
     this._store.flushPendingSave();
     return this._ok(cmd.id, { elapsed, message: `Timer stopped (${elapsed} minutes logged)` });

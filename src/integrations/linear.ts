@@ -55,6 +55,7 @@
 import type { Task, TaskPriority, TaskStatus } from "../store/types.ts";
 import { graphqlFetch } from "./http.ts";
 import type { ExternalTask, SyncProvider } from "./types.ts";
+import { sortParentsFirst as genericSortParentsFirst } from "./utils.ts";
 
 // ── OAuth placeholders ──────────────────────────────────────────────────────────
 
@@ -296,6 +297,10 @@ export class LinearProvider implements SyncProvider {
     this._stateIdToType = new Map(states.map((s) => [s.id, s.type]));
 
     // Build tsk status → first matching state ID
+    // Note: This deliberately chooses the first matching state as a default.
+    // When teams have multiple states of the same type (e.g., multiple "in progress"
+    // states), this will always map to the first one found. Future enhancement
+    // could allow selecting a different matching state.
     this._stateMapping = new Map();
     for (const [tskStatus, stateType] of Object.entries(TSK_STATUS_TO_STATE_TYPE)) {
       const match = states.find((s) => s.type === stateType);
@@ -631,22 +636,11 @@ function externalStatusToTsk(external: ExternalTask): TaskStatus {
 // ── Sort parents before children ────────────────────────────────────────────────
 
 function sortParentsFirst(issues: LinearIssue[]): LinearIssue[] {
-  const byId = new Map(issues.map((i) => [i.id, i]));
-  const visited = new Set<string>();
-  const result: LinearIssue[] = [];
-
-  function visit(issue: LinearIssue): void {
-    if (visited.has(issue.id)) return;
-    visited.add(issue.id);
-    if (issue.parent?.id) {
-      const parent = byId.get(issue.parent.id);
-      if (parent) visit(parent);
-    }
-    result.push(issue);
-  }
-
-  for (const issue of issues) visit(issue);
-  return result;
+  return genericSortParentsFirst(
+    issues,
+    (i: LinearIssue) => i.id,
+    (i: LinearIssue) => i.parent?.id ?? null,
+  );
 }
 
 // ── Setup helpers (used by CLI connect flow) ────────────────────────────────────

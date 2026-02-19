@@ -52,18 +52,26 @@
 import type { Task, TaskPriority } from "../store/types.ts";
 import { apiFetch } from "./http.ts";
 import type { ExternalTask, SyncProvider } from "./types.ts";
+import { sortParentsFirst } from "./utils.ts";
 
-// ── OAuth placeholders — replace with real values after app registration ──────
+// ── OAuth credentials accessor — throws if env vars not set ───────────────────
 
-/** @todo Register app at https://developer.todoist.com/appconsole.html */
-export const TODOIST_CLIENT_ID = process.env.TSK_TODOIST_CLIENT_ID ?? "TODO_REGISTER_CLIENT_ID";
-export const TODOIST_CLIENT_SECRET = process.env.TSK_TODOIST_CLIENT_SECRET ?? "TODO_REGISTER_CLIENT_SECRET";
+function getTodoistCredentials(): { clientId: string; clientSecret: string } {
+  const clientId = process.env.TSK_TODOIST_CLIENT_ID;
+  const clientSecret = process.env.TSK_TODOIST_CLIENT_SECRET;
+  if (!clientId || !clientSecret) {
+    throw new Error("Todoist OAuth credentials not configured: set TSK_TODOIST_CLIENT_ID and TSK_TODOIST_CLIENT_SECRET");
+  }
+  return { clientId, clientSecret };
+}
 
 // ── Constants ─────────────────────────────────────────────────────────────────
 
 const API_BASE = "https://api.todoist.com/rest/v2";
 
-// Priority mapping (Todoist 4=urgent … 1=normal, inverted from display)
+// Priority mapping (Todoist 4=urgent … 1=normal/low, inverted from display)
+// TSK_TO_TODOIST: low/none both map to 1 (Todoist's lowest priority)
+// TODOIST_TO_TSK: 1 maps to "low" to preserve identity on round-trip
 const TSK_TO_TODOIST_PRIORITY: Record<TaskPriority, number> = {
   urgent: 4,
   high: 3,
@@ -76,7 +84,7 @@ const TODOIST_TO_TSK_PRIORITY: Record<number, TaskPriority> = {
   4: "urgent",
   3: "high",
   2: "medium",
-  1: "none",
+  1: "low",
 };
 
 // ── Todoist API shapes ────────────────────────────────────────────────────────
@@ -292,8 +300,17 @@ export class TodoistProvider implements SyncProvider {
   // ── Subtasks ───────────────────────────────────────────────────────────────
 
   async fetchSubtasks(parentExternalId: string): Promise<ExternalTask[]> {
-    const all = await this.fetchTasks();
-    return all.filter((t) => t.parentExternalId === parentExternalId);
+    if (!(await this.isConnected())) return [];
+
+    const url = new URL(`${API_BASE}/tasks`);
+    url.searchParams.set("parent_id", parentExternalId);
+
+    const response = await apiFetch<TodoistTask[]>(url.toString(), {
+      headers: { Authorization: `Bearer ${this.accessToken}` },
+    });
+
+    if ("error" in response) return [];
+    return response.data.map((t) => this.mapTodoistTask(t));
   }
 
   async createSubtask(parentExternalId: string, task: ExternalTask): Promise<ExternalTask | null> {
@@ -345,7 +362,7 @@ export class TodoistProvider implements SyncProvider {
       project: task.project ?? undefined,
       labels: task.tags,
       dueDate: task.dueDate ?? undefined,
-      parentExternalId: task.parentId ?? null,
+      parentExternalId: null,
       updatedAt: task.updatedAt,
       completedAt: task.completedAt,
     };
@@ -409,26 +426,11 @@ function clampTodoistPriority(p: number | undefined): number {
  * This ensures the sync engine can resolve parent IDs during pull.
  */
 function sortParentsBeforeChildren(tasks: TodoistTask[]): TodoistTask[] {
-  const byId = new Map(tasks.map((t) => [t.id, t]));
-  const visited = new Set<string>();
-  const result: TodoistTask[] = [];
-
-  function visit(task: TodoistTask): void {
-    if (visited.has(task.id)) return;
-    visited.add(task.id);
-    // Visit parent first if it's in this batch
-    if (task.parent_id) {
-      const parent = byId.get(task.parent_id);
-      if (parent) visit(parent);
-    }
-    result.push(task);
-  }
-
-  for (const task of tasks) {
-    visit(task);
-  }
-
-  return result;
+  return sortParentsFirst(
+    tasks,
+    (t: TodoistTask) => t.id,
+    (t: TodoistTask) => t.parent_id ?? null,
+  );
 }
 
 // ── Factory ───────────────────────────────────────────────────────────────────
