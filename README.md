@@ -36,6 +36,8 @@ curl -fsSL https://raw.githubusercontent.com/Albertobelleiro/tsk-tui/main/instal
 
 Installs the binary to `/usr/local/bin/tsk`.
 
+If `/usr/local/bin` is not writable, the installer falls back to `~/.local/bin/tsk` automatically (no sudo prompt).
+
 ### From source
 
 ```bash
