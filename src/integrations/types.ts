@@ -1,60 +1,65 @@
-import type { Task, TaskPriority, ExternalSource } from "../store/types.ts";
-
-// ── External task representation ─────────────────────
+import type { ExternalSource, Task } from "../store/types.ts";
 
 export interface ExternalTask {
   externalId: string;
   title: string;
   description?: string;
-  status?: string;
-  priority?: string;
+  status: "open" | "closed";
+  priority?: number;
   project?: string;
-  tags?: string[];
-  dueDate?: string | null;
+  labels?: string[];
+  dueDate?: string;
+  parentExternalId?: string | null;
+  subtaskExternalIds?: string[];
+  updatedAt: string;
   completedAt?: string | null;
-  updatedAt?: string;
-  subtasks?: ExternalTask[];
+  url?: string;
 }
-
-export interface ExternalTaskInput {
-  title: string;
-  description?: string;
-  status?: string;
-  priority?: string;
-  project?: string;
-  tags?: string[];
-  dueDate?: string | null;
-}
-
-// ── Sync results ─────────────────────────────────────
-
-export interface SyncResult {
-  pulled: number;
-  pushed: number;
-  conflicts: number;
-  errors: string[];
-}
-
-// ── Sync provider interface ──────────────────────────
 
 export interface SyncProvider {
-  name: ExternalSource;
-  pull(): Promise<ExternalTask[]>;
-  push(tasks: Task[]): Promise<SyncResult>;
-  mapToTask(external: ExternalTask): Partial<Task>;
-  mapFromTask(task: Task): ExternalTaskInput;
+  readonly name: ExternalSource;
+
+  isConnected(): Promise<boolean>;
+  testConnection(): Promise<{ ok: boolean; user?: string; error?: string }>;
+
+  fetchTasks(options?: { updatedSince?: string }): Promise<ExternalTask[]>;
+  createTask(task: ExternalTask): Promise<ExternalTask | null>;
+  updateTask(externalId: string, updates: Partial<ExternalTask>): Promise<ExternalTask | null>;
+  completeTask(externalId: string): Promise<boolean>;
+  reopenTask(externalId: string): Promise<boolean>;
+  deleteTask(externalId: string): Promise<boolean>;
+
+  supportsSubtasks: boolean;
+  fetchSubtasks?(parentExternalId: string): Promise<ExternalTask[]>;
+  createSubtask?(parentExternalId: string, task: ExternalTask): Promise<ExternalTask | null>;
+
+  mapToLocal(external: ExternalTask): Partial<Task>;
+  mapToExternal(task: Task): Partial<ExternalTask>;
+
+  fetchProjects?(): Promise<Array<{ id: string; name: string }>>;
+  fetchLabels?(): Promise<Array<{ id: string; name: string }>>;
 }
 
-// ── Sync config ──────────────────────────────────────
+export interface SyncError {
+  taskId?: string;
+  externalId?: string;
+  operation: "pull" | "push" | "delete" | "map";
+  message: string;
+}
 
-export interface SyncConfig {
+export interface SyncResult {
   provider: ExternalSource;
-  lastSyncAt: string | null;
-  autoSync: boolean;
-  syncIntervalMinutes: number;
+  pulled: number;
+  pushed: number;
+  deleted: number;
+  conflicts: number;
+  errors: SyncError[];
+  timestamp: string;
+  durationMs: number;
 }
 
-// ── Agent bridge protocol ────────────────────────────
+// Legacy compatibility aliases used by current provider stubs.
+export type ExternalTaskInput = Partial<ExternalTask>;
 
 export interface AgentCommand {
   id: string;
@@ -65,7 +70,7 @@ export interface AgentCommand {
     title?: string;
     description?: string;
     project?: string;
-    priority?: TaskPriority;
+    priority?: Task["priority"];
     subtasks?: string[];
     taskId?: string;
     updates?: Partial<Task>;

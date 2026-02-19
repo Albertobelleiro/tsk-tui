@@ -1,133 +1,209 @@
-import type { Task, TaskPriority } from "../store/types.ts";
-import type { SyncProvider, ExternalTask, ExternalTaskInput, SyncResult } from "./types.ts";
+import type { Task } from "../store/types.ts";
+import { apiFetch } from "./http.ts";
+import type { ExternalTask, SyncProvider } from "./types.ts";
 
 const API_BASE = "https://api.todoist.com/rest/v2";
-const TIMEOUT_MS = 10000;
-
-// Todoist priority: 4=urgent, 3=high, 2=medium, 1=none/low
-const TSK_TO_TODOIST_PRIORITY: Record<TaskPriority, number> = {
-  urgent: 4, high: 3, medium: 2, low: 1, none: 1,
-};
-
-const TODOIST_TO_TSK_PRIORITY: Record<number, TaskPriority> = {
-  4: "urgent", 3: "high", 2: "medium", 1: "none",
-};
 
 export class TodoistProvider implements SyncProvider {
   readonly name = "todoist" as const;
-  private apiKey: string;
-  private projectFilter?: string;
+  readonly supportsSubtasks = true;
 
-  constructor(apiKey: string, projectFilter?: string) {
-    this.apiKey = apiKey;
-    this.projectFilter = projectFilter;
+  constructor(private accessToken: string, private projectId?: string) {}
+
+  async isConnected(): Promise<boolean> {
+    return this.accessToken.trim().length > 0;
   }
 
-  async pull(): Promise<ExternalTask[]> {
-    const controller = new AbortController();
-    const timeout = setTimeout(() => controller.abort(), TIMEOUT_MS);
-
-    try {
-      const url = this.projectFilter
-        ? `${API_BASE}/tasks?project_id=${this.projectFilter}`
-        : `${API_BASE}/tasks`;
-
-      const response = await fetch(url, {
-        headers: { Authorization: `Bearer ${this.apiKey}` },
-        signal: controller.signal,
-      });
-
-      if (!response.ok) {
-        throw new Error(`Todoist API error: ${response.status} ${response.statusText}`);
-      }
-
-      const tasks = await response.json() as TodoistTask[];
-      return tasks.map(this._mapFromTodoist);
-    } finally {
-      clearTimeout(timeout);
-    }
+  async testConnection(): Promise<{ ok: boolean; user?: string; error?: string }> {
+    if (!(await this.isConnected())) return { ok: false, error: "Missing Todoist token" };
+    const response = await apiFetch<{ email?: string }>(`${API_BASE}/user`, {
+      headers: { Authorization: `Bearer ${this.accessToken}` },
+    });
+    if ("error" in response) return { ok: false, error: response.error };
+    return { ok: true, user: response.data.email };
   }
 
-  async push(tasks: Task[]): Promise<SyncResult> {
-    const result: SyncResult = { pulled: 0, pushed: 0, conflicts: 0, errors: [] };
-
-    for (const task of tasks) {
-      if (task.externalSource === "todoist" && task.externalId) {
-        // Update existing Todoist task
-        try {
-          const controller = new AbortController();
-          const timeout = setTimeout(() => controller.abort(), TIMEOUT_MS);
-          try {
-            const body = this.mapFromTask(task);
-            const response = await fetch(`${API_BASE}/tasks/${task.externalId}`, {
-              method: "POST",
-              headers: {
-                Authorization: `Bearer ${this.apiKey}`,
-                "Content-Type": "application/json",
-              },
-              body: JSON.stringify(body),
-              signal: controller.signal,
-            });
-            if (response.ok) result.pushed++;
-            else result.errors.push(`Failed to update Todoist task ${task.externalId}`);
-          } finally {
-            clearTimeout(timeout);
-          }
-        } catch (err) {
-          result.errors.push(err instanceof Error ? err.message : String(err));
-        }
-      }
-    }
-
-    return result;
+  async fetchTasks(_options?: { updatedSince?: string }): Promise<ExternalTask[]> {
+    if (!(await this.isConnected())) return [];
+    const query = this.projectId ? `?project_id=${encodeURIComponent(this.projectId)}` : "";
+    const response = await apiFetch<TodoistTask[]>(`${API_BASE}/tasks${query}`, {
+      headers: { Authorization: `Bearer ${this.accessToken}` },
+    });
+    if ("error" in response) return [];
+    return response.data.map((task) => this.mapTodoistTask(task));
   }
 
-  mapToTask(external: ExternalTask): Partial<Task> {
+  async createTask(task: ExternalTask): Promise<ExternalTask | null> {
+    const response = await apiFetch<TodoistTask>(`${API_BASE}/tasks`, {
+      method: "POST",
+      headers: { Authorization: `Bearer ${this.accessToken}` },
+      body: {
+        content: task.title,
+        description: task.description ?? "",
+        due_date: task.dueDate,
+        labels: task.labels ?? [],
+      },
+    });
+    if ("error" in response) return null;
+    return this.mapTodoistTask(response.data);
+  }
+
+  async updateTask(externalId: string, updates: Partial<ExternalTask>): Promise<ExternalTask | null> {
+    const response = await apiFetch<unknown>(`${API_BASE}/tasks/${externalId}`, {
+      method: "POST",
+      headers: { Authorization: `Bearer ${this.accessToken}` },
+      body: {
+        content: updates.title,
+        description: updates.description,
+        due_date: updates.dueDate,
+        labels: updates.labels,
+      },
+    });
+    if ("error" in response) return null;
+    return {
+      externalId,
+      title: updates.title ?? "",
+      description: updates.description,
+      status: updates.status ?? "open",
+      priority: updates.priority,
+      project: updates.project,
+      labels: updates.labels,
+      dueDate: updates.dueDate,
+      parentExternalId: updates.parentExternalId,
+      subtaskExternalIds: updates.subtaskExternalIds,
+      updatedAt: new Date().toISOString(),
+      completedAt: updates.completedAt,
+      url: updates.url,
+    };
+  }
+
+  async completeTask(externalId: string): Promise<boolean> {
+    const response = await apiFetch<unknown>(`${API_BASE}/tasks/${externalId}/close`, {
+      method: "POST",
+      headers: { Authorization: `Bearer ${this.accessToken}` },
+    });
+    return !("error" in response);
+  }
+
+  async reopenTask(externalId: string): Promise<boolean> {
+    const response = await apiFetch<unknown>(`${API_BASE}/tasks/${externalId}/reopen`, {
+      method: "POST",
+      headers: { Authorization: `Bearer ${this.accessToken}` },
+    });
+    return !("error" in response);
+  }
+
+  async deleteTask(externalId: string): Promise<boolean> {
+    const response = await apiFetch<unknown>(`${API_BASE}/tasks/${externalId}`, {
+      method: "DELETE",
+      headers: { Authorization: `Bearer ${this.accessToken}` },
+    });
+    return !("error" in response);
+  }
+
+  async fetchSubtasks(parentExternalId: string): Promise<ExternalTask[]> {
+    const all = await this.fetchTasks();
+    return all.filter((task) => task.parentExternalId === parentExternalId);
+  }
+
+  async createSubtask(parentExternalId: string, task: ExternalTask): Promise<ExternalTask | null> {
+    return this.createTask({ ...task, parentExternalId });
+  }
+
+  mapToLocal(external: ExternalTask): Partial<Task> {
     return {
       title: external.title,
       description: external.description ?? "",
-      priority: external.priority as TaskPriority ?? "none",
+      status: external.status === "closed" ? "done" : "todo",
+      priority: mapPriorityToLocal(external.priority),
+      project: external.project ?? null,
+      tags: external.labels ?? [],
       dueDate: external.dueDate ?? null,
-      tags: external.tags ?? [],
+      completedAt: external.completedAt ?? null,
       externalId: external.externalId,
       externalSource: "todoist",
     };
   }
 
-  mapFromTask(task: Task): ExternalTaskInput {
+  mapToExternal(task: Task): Partial<ExternalTask> {
     return {
       title: task.title,
       description: task.description,
-      priority: String(TSK_TO_TODOIST_PRIORITY[task.priority]),
-      dueDate: task.dueDate,
-      tags: task.tags,
+      status: task.status === "done" ? "closed" : "open",
+      priority: mapPriorityToExternal(task.priority),
+      project: task.project ?? undefined,
+      labels: task.tags,
+      dueDate: task.dueDate ?? undefined,
+      parentExternalId: task.parentId ?? null,
+      updatedAt: task.updatedAt,
+      completedAt: task.completedAt,
     };
   }
 
-  private _mapFromTodoist(t: TodoistTask): ExternalTask {
+  private mapTodoistTask(task: TodoistTask): ExternalTask {
     return {
-      externalId: t.id,
-      title: t.content,
-      description: t.description ?? "",
-      priority: TODOIST_TO_TSK_PRIORITY[t.priority] ?? "none",
-      dueDate: t.due?.date ?? null,
-      tags: t.labels ?? [],
-      completedAt: t.is_completed ? new Date().toISOString() : null,
-      status: t.is_completed ? "done" : "todo",
+      externalId: task.id,
+      title: task.content,
+      description: task.description,
+      status: task.is_completed ? "closed" : "open",
+      priority: mapPriorityFromTodoist(task.priority),
+      labels: task.labels,
+      dueDate: task.due?.date,
+      parentExternalId: task.parent_id ?? null,
+      updatedAt: task.created_at ?? new Date().toISOString(),
+      completedAt: task.is_completed ? new Date().toISOString() : null,
+      url: task.url,
     };
   }
 }
 
-// ── Todoist API types ────────────────────────────────
+function mapPriorityFromTodoist(priority: number | undefined): number {
+  if (priority === 4) return 4;
+  if (priority === 3) return 3;
+  if (priority === 2) return 2;
+  if (priority === 1) return 1;
+  return 0;
+}
+
+function mapPriorityToLocal(priority: number | undefined): Task["priority"] {
+  switch (priority) {
+    case 4:
+      return "urgent";
+    case 3:
+      return "high";
+    case 2:
+      return "medium";
+    case 1:
+      return "low";
+    default:
+      return "none";
+  }
+}
+
+function mapPriorityToExternal(priority: Task["priority"]): number {
+  switch (priority) {
+    case "urgent":
+      return 4;
+    case "high":
+      return 3;
+    case "medium":
+      return 2;
+    case "low":
+      return 1;
+    default:
+      return 0;
+  }
+}
 
 interface TodoistTask {
   id: string;
   content: string;
   description?: string;
-  priority: number;
-  due?: { date: string; datetime?: string };
-  labels?: string[];
   is_completed: boolean;
-  project_id?: string;
+  priority?: number;
+  labels?: string[];
+  due?: { date?: string };
+  parent_id?: string;
   created_at?: string;
+  url?: string;
 }

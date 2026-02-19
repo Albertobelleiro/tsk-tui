@@ -1,9 +1,26 @@
 import { TaskStore } from "../store/task-store.ts";
 import type { Task, TaskStatus, TaskPriority } from "../store/types.ts";
-import { isDueOverdue, isDueToday, isDueThisWeek } from "../utils/date.ts";
+import { formatRelativeTime, isDueOverdue, isDueToday, isDueThisWeek } from "../utils/date.ts";
 import {
-  loadConfig, saveConfig, getConfigValue, setConfigValue, resetConfig,
+  ConfigManager,
+  getConfigPath,
+  getConfigValue,
+  loadConfig,
+  maskSecrets,
+  parseConfigValue,
+  resetConfig,
+  saveConfig,
+  setConfigValue,
 } from "../config/config.ts";
+import { SyncEngine, providerKeyToSource } from "../integrations/sync-engine.ts";
+import { SyncStateManager } from "../integrations/sync-state.ts";
+import { TodoistProvider } from "../integrations/todoist.ts";
+import { LinearProvider } from "../integrations/linear.ts";
+import { AsanaProvider } from "../integrations/asana.ts";
+import { GitHubIssuesProvider } from "../integrations/github-issues.ts";
+import { runOAuthFlow } from "../integrations/oauth-helpers.ts";
+import { runDeviceFlow } from "../integrations/oauth-device-flow.ts";
+import type { SyncProvider } from "../integrations/types.ts";
 import {
   setColorEnabled, bold, dim, cyan, green, red,
   formatTaskTable, formatTaskDetail, success, error,
@@ -24,7 +41,8 @@ const FLAGS_WITH_VALUE = new Set([
   "--due", "-d", "--desc", "--title", "--status", "--sort",
   "--subtask-of", "--under", "--format", "--recur",
   "--estimate", "--api-key", "--token", "--repo", "--team",
-  "--workspace",
+  "--workspace", "--label",
+  "--client-id", "--client-secret",
 ]);
 
 type FlagReadResult =
@@ -58,9 +76,16 @@ function getFlag(args: string[], long: string, short?: string): string | undefin
 }
 
 function findFirstMissingFlagValue(args: string[]): string | null {
+  const subcommand = args.find((a) => !a.startsWith("-"));
+  const valueLessForSubcommand = new Set<string>();
+  if (subcommand === "sync") {
+    valueLessForSubcommand.add("--status");
+  }
+
   for (let i = 0; i < args.length; i++) {
     const token = args[i]!;
     if (!FLAGS_WITH_VALUE.has(token)) continue;
+    if (valueLessForSubcommand.has(token)) continue;
     if (token.includes("=")) continue;
     const value = args[i + 1];
     if (value === undefined || value.startsWith("-")) {
@@ -221,7 +246,10 @@ Usage:
   tsk promote <id>             Make subtask top-level
   tsk estimate <id> <time>     Set time estimate
   tsk log <id> <time>          Log time spent
-  tsk config <get|set|list|reset|edit>  Manage config
+  tsk config <list|get|set|reset|edit|path>  Manage config
+  tsk connect <provider>       Connect provider (todoist|linear|asana|github)
+  tsk disconnect <provider>    Disconnect provider
+  tsk sync [provider]          Sync integrations
   tsk export [--format json|csv|markdown]
 
 Flags:
@@ -901,32 +929,41 @@ async function cmdConfig(args: string[]): Promise<number> {
       const key = pos[1];
       if (!key) { error("Usage: tsk config get <key>"); return EXIT_VALIDATION; }
       const val = await getConfigValue(key);
-      console.log(val !== undefined ? JSON.stringify(val, null, 2) : dim("(not set)"));
+      if (val === undefined) {
+        console.log(dim("(not set)"));
+        return EXIT_OK;
+      }
+      const masked = /token|secret|apikey|api_key/i.test(key) ? "****" : val;
+      console.log(JSON.stringify(masked, null, 2));
       return EXIT_OK;
     }
     case "set": {
       const key = pos[1];
       const value = pos[2];
       if (!key || value === undefined) { error("Usage: tsk config set <key> <value>"); return EXIT_VALIDATION; }
-      await setConfigValue(key, value);
+      await setConfigValue(key, parseConfigValue(value));
       success(`Set ${key} = ${value}`);
       return EXIT_OK;
     }
     case "list": {
       const config = await loadConfig();
-      console.log(JSON.stringify(config, null, 2));
+      console.log(JSON.stringify(maskSecrets(config), null, 2));
       return EXIT_OK;
     }
     case "reset": {
+      process.stdout.write("Reset config to defaults? [y/N] ");
+      const answer = await readLine();
+      if (answer.toLowerCase() !== "y") {
+        console.log("Cancelled.");
+        return EXIT_OK;
+      }
       await resetConfig();
       success("Config reset to defaults");
       return EXIT_OK;
     }
     case "edit": {
       const editor = process.env.EDITOR || "vim";
-      const { homedir } = await import("node:os");
-      const { join } = await import("node:path");
-      const configPath = join(homedir(), ".tsk", "config.json");
+      const configPath = getConfigPath();
       // Ensure config file exists
       const config = await loadConfig();
       await saveConfig(config);
@@ -934,10 +971,408 @@ async function cmdConfig(args: string[]): Promise<number> {
       await proc.exited;
       return EXIT_OK;
     }
+    case "path":
+      console.log(getConfigPath());
+      return EXIT_OK;
     default:
-      error("Usage: tsk config <get|set|list|reset|edit>");
+      error("Usage: tsk config <list|get|set|reset|edit|path>");
       return EXIT_VALIDATION;
   }
+}
+
+type ConnectProvider = "todoist" | "linear" | "asana" | "github";
+
+function parseConnectProvider(value: string | undefined): ConnectProvider | null {
+  if (value === "todoist" || value === "linear" || value === "asana" || value === "github") return value;
+  return null;
+}
+
+async function getGhCliToken(): Promise<string | null> {
+  try {
+    const proc = Bun.spawn(["gh", "auth", "token"], { stdout: "pipe", stderr: "pipe" });
+    const token = (await new Response(proc.stdout).text()).trim();
+    const code = await proc.exited;
+    if (code !== 0 || !token) return null;
+    return token;
+  } catch {
+    return null;
+  }
+}
+
+async function createProviderForKey(provider: ConnectProvider, config: Awaited<ReturnType<typeof loadConfig>>): Promise<SyncProvider | null> {
+  switch (provider) {
+    case "todoist": {
+      const cfg = config.integrations.todoist;
+      if (!cfg?.accessToken) return null;
+      return new TodoistProvider(cfg.accessToken, cfg.projectId);
+    }
+    case "linear": {
+      const cfg = config.integrations.linear;
+      if (!cfg?.accessToken) return null;
+      return new LinearProvider(cfg.accessToken, cfg.teamId);
+    }
+    case "asana": {
+      const cfg = config.integrations.asana;
+      if (!cfg?.accessToken) return null;
+      return new AsanaProvider(cfg.accessToken, cfg.workspaceId, cfg.projectId);
+    }
+    case "github": {
+      const cfg = config.integrations.github;
+      if (!cfg?.repo) return null;
+      return new GitHubIssuesProvider(cfg.repo, {
+        accessToken: cfg.accessToken,
+        useGhCli: cfg.useGhCli,
+        labelFilter: cfg.labelFilter,
+      });
+    }
+  }
+}
+
+async function cmdConnect(args: string[]): Promise<number> {
+  const pos = positionalArgs(args);
+  const provider = parseConnectProvider(pos[0]);
+  if (!provider) {
+    error("Usage: tsk connect <todoist|linear|asana|github> [--token ...] [--api-key ...]");
+    return EXIT_VALIDATION;
+  }
+
+  const config = await loadConfig();
+  const alreadyConnected = (
+    (provider === "todoist" && !!config.integrations.todoist?.accessToken) ||
+    (provider === "linear" && !!config.integrations.linear?.accessToken) ||
+    (provider === "asana" && !!config.integrations.asana?.accessToken) ||
+    (provider === "github" && !!config.integrations.github?.repo && (!!config.integrations.github?.accessToken || !!config.integrations.github?.useGhCli))
+  );
+
+  if (alreadyConnected) {
+    process.stdout.write(`Already connected to ${provider}. Reconnect? [y/N] `);
+    const answer = await readLine();
+    if (answer.toLowerCase() !== "y") {
+      console.log("Cancelled.");
+      return EXIT_OK;
+    }
+  }
+
+  const tokenFlag = getFlag(args, "--token");
+  const apiKeyFlag = getFlag(args, "--api-key");
+  const repoFlag = getFlag(args, "--repo");
+  const clientId = getFlag(args, "--client-id");
+  const clientSecret = getFlag(args, "--client-secret");
+
+  try {
+    switch (provider) {
+      case "todoist": {
+        let accessToken = tokenFlag ?? apiKeyFlag ?? "";
+        let refreshToken: string | undefined;
+
+        if (!accessToken) {
+          const cid = clientId ?? process.env.TSK_TODOIST_CLIENT_ID;
+          const secret = clientSecret ?? process.env.TSK_TODOIST_CLIENT_SECRET;
+          if (!cid || !secret) {
+            error("Missing token and OAuth client credentials for Todoist");
+            return EXIT_VALIDATION;
+          }
+          const oauth = await runOAuthFlow({
+            authorizeUrl: "https://todoist.com/oauth/authorize",
+            tokenUrl: "https://todoist.com/oauth/access_token",
+            clientId: cid,
+            clientSecret: secret,
+            scopes: ["data:read_write"],
+            usePkce: true,
+          });
+          accessToken = oauth.accessToken;
+          refreshToken = oauth.refreshToken;
+        }
+
+        config.integrations.todoist = {
+          accessToken,
+          refreshToken,
+          projectFilter: getFlag(args, "--project"),
+        };
+        break;
+      }
+      case "linear": {
+        let accessToken = tokenFlag ?? apiKeyFlag ?? "";
+        if (!accessToken) {
+          const cid = clientId ?? process.env.TSK_LINEAR_CLIENT_ID;
+          const secret = clientSecret ?? process.env.TSK_LINEAR_CLIENT_SECRET;
+          if (!cid) {
+            error("Missing token/api-key and OAuth client id for Linear");
+            return EXIT_VALIDATION;
+          }
+          const oauth = await runOAuthFlow({
+            authorizeUrl: "https://linear.app/oauth/authorize",
+            tokenUrl: "https://api.linear.app/oauth/token",
+            clientId: cid,
+            clientSecret: secret,
+            scopes: ["read", "write"],
+            usePkce: true,
+          });
+          accessToken = oauth.accessToken;
+        }
+
+        config.integrations.linear = {
+          accessToken,
+          teamId: getFlag(args, "--team"),
+          projectId: getFlag(args, "--project"),
+        };
+        break;
+      }
+      case "asana": {
+        let accessToken = tokenFlag ?? "";
+        let refreshToken: string | undefined;
+        let tokenExpiresAt: string | undefined;
+
+        if (!accessToken) {
+          const cid = clientId ?? process.env.TSK_ASANA_CLIENT_ID;
+          const secret = clientSecret ?? process.env.TSK_ASANA_CLIENT_SECRET;
+          if (!cid || !secret) {
+            error("Missing token and OAuth client credentials for Asana");
+            return EXIT_VALIDATION;
+          }
+          const oauth = await runOAuthFlow({
+            authorizeUrl: "https://app.asana.com/-/oauth_authorize",
+            tokenUrl: "https://app.asana.com/-/oauth_token",
+            clientId: cid,
+            clientSecret: secret,
+            scopes: ["default"],
+            usePkce: true,
+          });
+          accessToken = oauth.accessToken;
+          refreshToken = oauth.refreshToken;
+          tokenExpiresAt = oauth.expiresIn ? new Date(Date.now() + oauth.expiresIn * 1000).toISOString() : undefined;
+        }
+
+        config.integrations.asana = {
+          accessToken,
+          refreshToken,
+          tokenExpiresAt,
+          workspaceId: getFlag(args, "--workspace"),
+          projectId: getFlag(args, "--project"),
+        };
+        break;
+      }
+      case "github": {
+        const repo = repoFlag ?? config.integrations.github?.repo;
+        if (!repo) {
+          error("GitHub requires --repo owner/repo");
+          return EXIT_VALIDATION;
+        }
+
+        let accessToken = tokenFlag;
+        let useGhCli = false;
+
+        if (!accessToken) {
+          const ghToken = await getGhCliToken();
+          if (ghToken) {
+            accessToken = ghToken;
+            useGhCli = true;
+          }
+        }
+
+        if (!accessToken) {
+          const cid = clientId ?? process.env.TSK_GITHUB_CLIENT_ID;
+          if (!cid) {
+            error("Missing --token and GitHub OAuth client id");
+            return EXIT_VALIDATION;
+          }
+          const device = await runDeviceFlow({
+            deviceCodeUrl: "https://github.com/login/device/code",
+            tokenUrl: "https://github.com/login/oauth/access_token",
+            clientId: cid,
+            scopes: ["repo"],
+          });
+          accessToken = device.accessToken;
+        }
+
+        config.integrations.github = {
+          accessToken,
+          repo,
+          useGhCli,
+          labelFilter: getFlag(args, "--label")
+            ? getFlag(args, "--label")!.split(",").map((s) => s.trim()).filter(Boolean)
+            : undefined,
+        };
+        break;
+      }
+    }
+
+    await saveConfig(config);
+
+    const providerInstance = await createProviderForKey(provider, config);
+    if (!providerInstance) {
+      error(`Failed to initialize ${provider} provider`);
+      return EXIT_ERROR;
+    }
+
+    const connection = await providerInstance.testConnection();
+    if (!connection.ok) {
+      if (tokenFlag || apiKeyFlag) {
+        console.log(dim(`Warning: saved credentials but test failed (${connection.error ?? "unknown error"})`));
+        success(`Connected to ${provider}`);
+        return EXIT_OK;
+      }
+      error(`Failed: ${connection.error ?? "connection test failed"}`);
+      return EXIT_ERROR;
+    }
+
+    success(`Connected to ${provider}${connection.user ? ` as ${connection.user}` : ""}`);
+    return EXIT_OK;
+  } catch (err) {
+    error(err instanceof Error ? err.message : String(err));
+    return EXIT_ERROR;
+  }
+}
+
+async function cmdDisconnect(args: string[]): Promise<number> {
+  const pos = positionalArgs(args);
+  const provider = parseConnectProvider(pos[0]);
+  if (!provider) {
+    error("Usage: tsk disconnect <todoist|linear|asana|github>");
+    return EXIT_VALIDATION;
+  }
+
+  const source = providerKeyToSource(provider);
+  if (!source) {
+    error(`Unsupported provider: ${provider}`);
+    return EXIT_VALIDATION;
+  }
+
+  const config = await loadConfig();
+  if (provider === "github") delete config.integrations.github;
+  else if (provider === "todoist") delete config.integrations.todoist;
+  else if (provider === "linear") delete config.integrations.linear;
+  else if (provider === "asana") delete config.integrations.asana;
+  await saveConfig(config);
+
+  const store = await TaskStore.create();
+  for (const task of store.tasks) {
+    if (task.externalSource === source) {
+      task.externalSource = null;
+      task.externalId = null;
+    }
+  }
+  await store.save();
+
+  const state = await SyncStateManager.load();
+  delete state.lastSyncAt[source];
+  for (const [localId, externalId] of Object.entries({ ...state.idMap })) {
+    const task = store.tasks.find((t) => t.id === localId);
+    if (!task || task.externalSource === source) {
+      SyncStateManager.removeMapping(state, localId);
+      state.deletedRemotely = state.deletedRemotely.filter((id) => id !== externalId);
+    }
+  }
+  await SyncStateManager.save(state);
+
+  success(`Disconnected ${provider}`);
+  return EXIT_OK;
+}
+
+function formatLastSync(iso?: string): string {
+  if (!iso) return "never";
+  return formatRelativeTime(iso);
+}
+
+async function cmdSyncStatus(): Promise<number> {
+  const config = await loadConfig();
+  const state = await SyncStateManager.load();
+  const store = await TaskStore.create();
+
+  const rows = [
+    {
+      label: "Todoist",
+      connected: !!config.integrations.todoist?.accessToken,
+      source: "todoist" as const,
+    },
+    {
+      label: "Linear",
+      connected: !!config.integrations.linear?.accessToken,
+      source: "linear" as const,
+    },
+    {
+      label: "Asana",
+      connected: !!config.integrations.asana?.accessToken,
+      source: "asana" as const,
+    },
+    {
+      label: "GitHub",
+      connected: !!config.integrations.github?.repo && (!!config.integrations.github?.accessToken || !!config.integrations.github?.useGhCli),
+      source: "github-issues" as const,
+    },
+  ];
+
+  console.log("Integration Status:");
+  for (const row of rows) {
+    const indicator = row.connected ? green("✓ Connected") : red("✗ Not connected");
+    const lastSync = formatLastSync(state.lastSyncAt[row.source]);
+    const syncedCount = store.tasks.filter((task) => task.externalSource === row.source).length;
+    console.log(`  ${pad(row.label, 10)} ${indicator}    Last sync: ${pad(lastSync, 10)}    Tasks: ${syncedCount} synced`);
+  }
+  const agentEnabled = config.integrations.agent?.enabled ?? false;
+  console.log(`  ${pad("Agent", 10)} ${agentEnabled ? cyan("○ Enabled") : dim("○ Disabled")}`);
+  return EXIT_OK;
+}
+
+async function cmdSync(args: string[]): Promise<number> {
+  if (hasFlag(args, "--status")) {
+    return cmdSyncStatus();
+  }
+
+  if (hasFlag(args, "--reset")) {
+    await SyncStateManager.save(SyncStateManager.defaults());
+    success("Sync state reset");
+    return EXIT_OK;
+  }
+
+  const pos = positionalArgs(args);
+  const providerArg = pos[0];
+  const providers: ConnectProvider[] = providerArg
+    ? (() => {
+      const single = parseConnectProvider(providerArg);
+      return single ? [single] : [];
+    })()
+    : ["todoist", "linear", "asana", "github"];
+
+  if (providers.length === 0) {
+    error("Usage: tsk sync [todoist|linear|asana|github] [--pull-only|--push-only|--dry-run|--status|--reset]");
+    return EXIT_VALIDATION;
+  }
+
+  const pullOnly = hasFlag(args, "--pull-only");
+  const pushOnly = hasFlag(args, "--push-only");
+  const dryRun = hasFlag(args, "--dry-run");
+  if (pullOnly && pushOnly) {
+    error("Cannot use --pull-only and --push-only together");
+    return EXIT_VALIDATION;
+  }
+
+  const config = await loadConfig();
+  const store = await TaskStore.create();
+  const state = await SyncStateManager.load();
+  let ran = 0;
+
+  for (const providerKey of providers) {
+    const provider = await createProviderForKey(providerKey, config);
+    if (!provider) continue;
+    const engine = new SyncEngine(store, provider, state, config.sync);
+    const result = await engine.sync({ pullOnly, pushOnly, dryRun });
+    ran += 1;
+    console.log(`${providerKey}: pulled=${result.pulled} pushed=${result.pushed} deleted=${result.deleted} conflicts=${result.conflicts} errors=${result.errors.length}`);
+    for (const err of result.errors) {
+      console.log(dim(`  - ${err.operation}: ${err.message}`));
+    }
+  }
+
+  if (ran === 0) {
+    console.log(dim("No connected providers."));
+    return EXIT_OK;
+  }
+
+  if (dryRun) {
+    console.log("No changes applied.");
+  }
+  return EXIT_OK;
 }
 
 // ── Export command ────────────────────────────────────
@@ -1137,6 +1572,9 @@ export async function runCLI(args: string[]): Promise<number> {
       case "estimate": return await cmdEstimate(handlerArgs);
       case "log": return await cmdLogTime(handlerArgs);
       case "config": return await cmdConfig(handlerArgs);
+      case "connect": return await cmdConnect(handlerArgs);
+      case "disconnect": return await cmdDisconnect(handlerArgs);
+      case "sync": return await cmdSync(handlerArgs);
       case "export": return await cmdExport(handlerArgs);
       default:
         error(`Unknown command: "${subcommand}"`);

@@ -1,123 +1,142 @@
-import type { Task, TaskPriority, TaskStatus } from "../store/types.ts";
-import type { SyncProvider, ExternalTask, ExternalTaskInput, SyncResult } from "./types.ts";
+import type { Task } from "../store/types.ts";
+import { graphqlFetch } from "./http.ts";
+import type { ExternalTask, SyncProvider } from "./types.ts";
 
 const API_URL = "https://api.linear.app/graphql";
-const TIMEOUT_MS = 10000;
-
-// Linear priority: 0=none, 1=urgent, 2=high, 3=medium, 4=low
-const TSK_TO_LINEAR_PRIORITY: Record<TaskPriority, number> = {
-  urgent: 1, high: 2, medium: 3, low: 4, none: 0,
-};
-
-const LINEAR_TO_TSK_PRIORITY: Record<number, TaskPriority> = {
-  0: "none", 1: "urgent", 2: "high", 3: "medium", 4: "low",
-};
-
-const LINEAR_STATUS_MAP: Record<string, TaskStatus> = {
-  "Backlog": "todo",
-  "Todo": "todo",
-  "In Progress": "in_progress",
-  "Done": "done",
-  "Canceled": "archived",
-};
 
 export class LinearProvider implements SyncProvider {
   readonly name = "linear" as const;
-  private apiKey: string;
-  private teamId?: string;
+  readonly supportsSubtasks = false;
 
-  constructor(apiKey: string, teamId?: string) {
-    this.apiKey = apiKey;
-    this.teamId = teamId;
+  constructor(private accessToken: string, private teamId?: string) {}
+
+  async isConnected(): Promise<boolean> {
+    return this.accessToken.trim().length > 0;
   }
 
-  async pull(): Promise<ExternalTask[]> {
-    const controller = new AbortController();
-    const timeout = setTimeout(() => controller.abort(), TIMEOUT_MS);
-
-    try {
-      const teamFilter = this.teamId ? `team: { id: { eq: "${this.teamId}" } }` : "";
-      const query = `{
-        issues(filter: { ${teamFilter} }) {
-          nodes {
-            id
-            title
-            description
-            priority
-            state { name }
-            dueDate
-            labels { nodes { name } }
-            updatedAt
-            completedAt
-          }
-        }
-      }`;
-
-      const response = await fetch(API_URL, {
-        method: "POST",
-        headers: {
-          Authorization: this.apiKey,
-          "Content-Type": "application/json",
-        },
-        body: JSON.stringify({ query }),
-        signal: controller.signal,
-      });
-
-      if (!response.ok) {
-        throw new Error(`Linear API error: ${response.status}`);
-      }
-
-      const json = await response.json() as { data: { issues: { nodes: LinearIssue[] } } };
-      return json.data.issues.nodes.map(this._mapFromLinear);
-    } finally {
-      clearTimeout(timeout);
-    }
+  async testConnection(): Promise<{ ok: boolean; user?: string; error?: string }> {
+    if (!(await this.isConnected())) return { ok: false, error: "Missing Linear token" };
+    const query = "query { viewer { name } }";
+    const result = await graphqlFetch<{ viewer?: { name?: string } }>(API_URL, {
+      query,
+      token: this.accessToken,
+    });
+    if ("error" in result) return { ok: false, error: result.error };
+    return { ok: true, user: result.data.viewer?.name };
   }
 
-  async push(tasks: Task[]): Promise<SyncResult> {
-    const result: SyncResult = { pulled: 0, pushed: 0, conflicts: 0, errors: [] };
-
-    // TODO: Implement push via Linear's mutation API
-    // For now, pull-only integration
-    result.errors.push("Linear push not yet implemented — pull-only sync");
-    return result;
+  async fetchTasks(_options?: { updatedSince?: string }): Promise<ExternalTask[]> {
+    const filter = this.teamId ? `team: { id: { eq: \"${this.teamId}\" } }` : "";
+    const query = `query { issues(filter: { ${filter} }) { nodes { id title description priority updatedAt completedAt dueDate state { type } labels { nodes { name } } } } }`;
+    const result = await graphqlFetch<{ issues?: { nodes?: LinearIssue[] } }>(API_URL, {
+      query,
+      token: this.accessToken,
+    });
+    if ("error" in result) return [];
+    return (result.data.issues?.nodes ?? []).map((issue) => this.mapIssue(issue));
   }
 
-  mapToTask(external: ExternalTask): Partial<Task> {
+  async createTask(_task: ExternalTask): Promise<ExternalTask | null> {
+    return null;
+  }
+
+  async updateTask(_externalId: string, _updates: Partial<ExternalTask>): Promise<ExternalTask | null> {
+    return null;
+  }
+
+  async completeTask(_externalId: string): Promise<boolean> {
+    return false;
+  }
+
+  async reopenTask(_externalId: string): Promise<boolean> {
+    return false;
+  }
+
+  async deleteTask(_externalId: string): Promise<boolean> {
+    return false;
+  }
+
+  mapToLocal(external: ExternalTask): Partial<Task> {
     return {
       title: external.title,
       description: external.description ?? "",
-      priority: external.priority as TaskPriority ?? "none",
-      status: external.status as TaskStatus ?? "todo",
+      status: external.status === "closed" ? "done" : "todo",
+      priority: toLocalPriority(external.priority),
+      tags: external.labels ?? [],
       dueDate: external.dueDate ?? null,
-      tags: external.tags ?? [],
       externalId: external.externalId,
       externalSource: "linear",
+      completedAt: external.completedAt ?? null,
     };
   }
 
-  mapFromTask(task: Task): ExternalTaskInput {
+  mapToExternal(task: Task): Partial<ExternalTask> {
     return {
       title: task.title,
       description: task.description,
-      priority: String(TSK_TO_LINEAR_PRIORITY[task.priority]),
-      dueDate: task.dueDate,
+      status: task.status === "done" ? "closed" : "open",
+      priority: toExternalPriority(task.priority),
+      labels: task.tags,
+      dueDate: task.dueDate ?? undefined,
+      updatedAt: task.updatedAt,
+      completedAt: task.completedAt,
     };
   }
 
-  private _mapFromLinear(issue: LinearIssue): ExternalTask {
-    const statusName = issue.state?.name ?? "Backlog";
+  async fetchProjects(): Promise<Array<{ id: string; name: string }>> {
+    const query = this.teamId
+      ? `query { team(id: \"${this.teamId}\") { projects { nodes { id name } } } }`
+      : "query { projects { nodes { id name } } }";
+    const result = await graphqlFetch<{ team?: { projects?: { nodes?: Array<{ id: string; name: string }> } }; projects?: { nodes?: Array<{ id: string; name: string }> } }>(API_URL, {
+      query,
+      token: this.accessToken,
+    });
+    if ("error" in result) return [];
+    return result.data.team?.projects?.nodes ?? result.data.projects?.nodes ?? [];
+  }
+
+  private mapIssue(issue: LinearIssue): ExternalTask {
     return {
       externalId: issue.id,
       title: issue.title,
-      description: issue.description ?? "",
-      priority: LINEAR_TO_TSK_PRIORITY[issue.priority] ?? "none",
-      status: LINEAR_STATUS_MAP[statusName] ?? "todo",
-      dueDate: issue.dueDate ?? null,
-      tags: issue.labels?.nodes?.map((l) => l.name) ?? [],
-      completedAt: issue.completedAt ?? null,
+      description: issue.description,
+      status: issue.state?.type === "completed" ? "closed" : "open",
+      priority: typeof issue.priority === "number" ? Math.max(0, 4 - issue.priority) : 0,
+      labels: issue.labels?.nodes?.map((label) => label.name) ?? [],
+      dueDate: issue.dueDate,
       updatedAt: issue.updatedAt,
+      completedAt: issue.completedAt ?? null,
     };
+  }
+}
+
+function toLocalPriority(priority?: number): Task["priority"] {
+  switch (priority) {
+    case 4:
+      return "urgent";
+    case 3:
+      return "high";
+    case 2:
+      return "medium";
+    case 1:
+      return "low";
+    default:
+      return "none";
+  }
+}
+
+function toExternalPriority(priority: Task["priority"]): number {
+  switch (priority) {
+    case "urgent":
+      return 1;
+    case "high":
+      return 2;
+    case "medium":
+      return 3;
+    case "low":
+      return 4;
+    default:
+      return 0;
   }
 }
 
@@ -125,10 +144,10 @@ interface LinearIssue {
   id: string;
   title: string;
   description?: string;
-  priority: number;
-  state?: { name: string };
-  dueDate?: string;
-  labels?: { nodes: Array<{ name: string }> };
-  updatedAt?: string;
+  priority?: number;
+  updatedAt: string;
   completedAt?: string;
+  dueDate?: string;
+  state?: { type?: string };
+  labels?: { nodes?: Array<{ name: string }> };
 }

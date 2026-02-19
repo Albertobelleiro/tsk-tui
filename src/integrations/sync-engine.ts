@@ -1,119 +1,326 @@
-import type { Task } from "../store/types.ts";
 import type { TaskStore } from "../store/task-store.ts";
-import type { SyncProvider, SyncResult, ExternalTask } from "./types.ts";
+import type { Task, ExternalSource } from "../store/types.ts";
+import type { TskConfig } from "../config/types.ts";
+import type { ExternalTask, SyncError, SyncProvider, SyncResult } from "./types.ts";
+import { SyncStateManager, type SyncState } from "./sync-state.ts";
+
+function toMillis(iso: string | null | undefined): number {
+  if (!iso) return 0;
+  const ms = Date.parse(iso);
+  return Number.isFinite(ms) ? ms : 0;
+}
+
+function hashExternalTask(task: ExternalTask): string {
+  return JSON.stringify({
+    title: task.title,
+    description: task.description ?? "",
+    status: task.status,
+    priority: task.priority ?? null,
+    project: task.project ?? null,
+    labels: task.labels ?? [],
+    dueDate: task.dueDate ?? null,
+    parentExternalId: task.parentExternalId ?? null,
+    subtaskExternalIds: task.subtaskExternalIds ?? [],
+    updatedAt: task.updatedAt,
+    completedAt: task.completedAt ?? null,
+  });
+}
+
+function applyLocalUpdate(store: TaskStore, localTask: Task, mapped: Partial<Task>): void {
+  const updates: Partial<Pick<Task, "title" | "description" | "priority" | "project" | "tags" | "dueDate" | "status">> = {};
+
+  if (typeof mapped.title === "string") updates.title = mapped.title;
+  if (typeof mapped.description === "string") updates.description = mapped.description;
+  if (mapped.priority) updates.priority = mapped.priority;
+  if (mapped.project !== undefined) updates.project = mapped.project;
+  if (Array.isArray(mapped.tags)) updates.tags = mapped.tags;
+  if (mapped.dueDate !== undefined) updates.dueDate = mapped.dueDate;
+  if (mapped.status) updates.status = mapped.status;
+
+  if (Object.keys(updates).length > 0) {
+    store.updateTask(localTask.id, updates);
+  }
+
+  localTask.externalId = localTask.externalId ?? mapped.externalId ?? localTask.externalId;
+  localTask.externalSource = localTask.externalSource ?? mapped.externalSource ?? localTask.externalSource;
+
+  if (mapped.parentId !== undefined) {
+    localTask.parentId = mapped.parentId;
+  }
+}
+
+function shouldPullUpdate(
+  strategy: TskConfig["sync"]["conflictStrategy"],
+  remoteUpdatedAt: string,
+  localUpdatedAt: string,
+): boolean {
+  if (strategy === "remote-wins") return true;
+  if (strategy === "local-wins") return false;
+  return toMillis(remoteUpdatedAt) > toMillis(localUpdatedAt);
+}
 
 export class SyncEngine {
   constructor(
     private store: TaskStore,
     private provider: SyncProvider,
+    private syncState: SyncState,
+    private config: TskConfig["sync"],
   ) {}
 
-  /** Full bidirectional sync */
-  async sync(): Promise<SyncResult> {
-    const result: SyncResult = { pulled: 0, pushed: 0, conflicts: 0, errors: [] };
+  async sync(options?: { pullOnly?: boolean; pushOnly?: boolean; dryRun?: boolean }): Promise<SyncResult> {
+    const startedAt = Date.now();
+    const errors: SyncError[] = [];
+    let pulled = 0;
+    let pushed = 0;
+    let deleted = 0;
+    let conflicts = 0;
 
-    try {
-      // Pull external tasks
-      const externalTasks = await this.provider.pull();
+    const providerName = this.provider.name;
+    const lastSyncAt = this.syncState.lastSyncAt[providerName];
 
-      // Process each external task
-      for (const ext of externalTasks) {
-        const existing = this.store.tasks.find(
-          (t) => t.externalId === ext.externalId && t.externalSource === this.provider.name
-        );
+    let remoteTasks: ExternalTask[] = [];
+    if (!options?.pushOnly) {
+      try {
+        remoteTasks = await this.provider.fetchTasks({ updatedSince: lastSyncAt });
+      } catch (error) {
+        errors.push({
+          operation: "pull",
+          message: error instanceof Error ? error.message : String(error),
+        });
+      }
+    }
 
-        if (existing) {
-          // Conflict resolution: last-write-wins based on updatedAt
-          const extUpdated = ext.updatedAt ?? "";
-          if (extUpdated > existing.updatedAt) {
-            const mapped = this.provider.mapToTask(ext);
-            this.store.updateTask(existing.id, mapped as Partial<Pick<Task, "title" | "description" | "priority" | "project" | "tags" | "dueDate" | "status">>);
-            result.pulled++;
-          } else if (existing.updatedAt > extUpdated) {
-            result.conflicts++;
+    const remoteById = new Map(remoteTasks.map((task) => [task.externalId, task]));
+
+    if (!options?.pushOnly) {
+      for (const remoteTask of remoteTasks) {
+        const localId = SyncStateManager.getLocalId(this.syncState, remoteTask.externalId);
+
+        if (localId) {
+          const localTask = this.store.tasks.find((task) => task.id === localId);
+
+          if (!localTask) {
+            if (!options?.dryRun) {
+              SyncStateManager.removeMapping(this.syncState, localId);
+            }
+            continue;
+          }
+
+          if (this.syncState.deletedLocally.includes(localId)) {
+            if (!options?.dryRun) {
+              const deletedRemote = await this.provider.deleteTask(remoteTask.externalId);
+              if (deletedRemote) {
+                deleted += 1;
+                this.syncState.deletedLocally = this.syncState.deletedLocally.filter((id) => id !== localId);
+              }
+            }
+            continue;
+          }
+
+          const shouldUpdate = shouldPullUpdate(
+            this.config.conflictStrategy,
+            remoteTask.updatedAt,
+            localTask.updatedAt,
+          );
+
+          if (!shouldUpdate) {
+            conflicts += 1;
+            continue;
+          }
+
+          if (!options?.dryRun) {
+            try {
+              const mapped = this.provider.mapToLocal(remoteTask);
+              applyLocalUpdate(this.store, localTask, mapped);
+              this.syncState.lastPullHashes[remoteTask.externalId] = hashExternalTask(remoteTask);
+              pulled += 1;
+            } catch (error) {
+              errors.push({
+                taskId: localTask.id,
+                externalId: remoteTask.externalId,
+                operation: "map",
+                message: error instanceof Error ? error.message : String(error),
+              });
+            }
+          } else {
+            pulled += 1;
           }
         } else {
-          // New task from external
-          const mapped = this.provider.mapToTask(ext);
-          this.store.addTask({
-            title: mapped.title ?? ext.title,
-            description: mapped.description,
-            priority: mapped.priority,
-            project: mapped.project,
-            tags: mapped.tags,
-            dueDate: mapped.dueDate,
-          });
-          // Set external tracking on the newly created task
-          const newTask = this.store.tasks[this.store.tasks.length - 1]!;
-          newTask.externalId = ext.externalId;
-          newTask.externalSource = this.provider.name;
-          result.pulled++;
+          if (!options?.dryRun) {
+            try {
+              const mapped = this.provider.mapToLocal(remoteTask);
+              const local = this.store.addTask({
+                title: mapped.title ?? remoteTask.title,
+                description: mapped.description ?? "",
+                priority: mapped.priority ?? "none",
+                project: mapped.project ?? remoteTask.project ?? null,
+                tags: mapped.tags ?? remoteTask.labels ?? [],
+                dueDate: mapped.dueDate ?? remoteTask.dueDate ?? null,
+                parentId: null,
+              });
+              local.externalId = remoteTask.externalId;
+              local.externalSource = providerName;
+
+              if (remoteTask.parentExternalId) {
+                const parentLocalId = SyncStateManager.getLocalId(this.syncState, remoteTask.parentExternalId);
+                if (parentLocalId) {
+                  local.parentId = parentLocalId;
+                }
+              }
+
+              SyncStateManager.addMapping(this.syncState, local.id, remoteTask.externalId);
+              this.syncState.lastPullHashes[remoteTask.externalId] = hashExternalTask(remoteTask);
+              pulled += 1;
+            } catch (error) {
+              errors.push({
+                externalId: remoteTask.externalId,
+                operation: "pull",
+                message: error instanceof Error ? error.message : String(error),
+              });
+            }
+          } else {
+            pulled += 1;
+          }
         }
       }
-
-      // Push local changes
-      const localTasks = this.store.tasks.filter(
-        (t) => t.externalSource === this.provider.name || t.externalSource === null
-      );
-      const pushResult = await this.provider.push(localTasks);
-      result.pushed = pushResult.pushed;
-      result.errors.push(...pushResult.errors);
-
-      await this.store.save();
-    } catch (err) {
-      result.errors.push(err instanceof Error ? err.message : String(err));
     }
 
-    return result;
+    if (!options?.pullOnly) {
+      const changedLocalTasks = this.store.tasks.filter((task) => {
+        if (task.status === "archived") return false;
+
+        if (task.externalSource === providerName && task.externalId) {
+          return toMillis(task.updatedAt) > toMillis(lastSyncAt);
+        }
+
+        if (task.externalSource === null && task.externalId === null) {
+          return true;
+        }
+
+        return false;
+      });
+
+      for (const localTask of changedLocalTasks) {
+        if (options?.dryRun) {
+          pushed += 1;
+          continue;
+        }
+
+        try {
+          if (localTask.externalId) {
+            const updates = this.provider.mapToExternal(localTask);
+            const updated = await this.provider.updateTask(localTask.externalId, updates);
+            if (updated) {
+              pushed += 1;
+              this.syncState.lastPullHashes[localTask.externalId] = hashExternalTask(updated);
+            } else {
+              errors.push({ taskId: localTask.id, externalId: localTask.externalId, operation: "push", message: "Update failed" });
+            }
+          } else {
+            const payload = this.provider.mapToExternal(localTask);
+            const created = await this.provider.createTask({
+              externalId: "",
+              title: payload.title ?? localTask.title,
+              description: payload.description ?? localTask.description,
+              status: payload.status ?? (localTask.status === "done" ? "closed" : "open"),
+              priority: payload.priority,
+              project: payload.project,
+              labels: payload.labels,
+              dueDate: payload.dueDate,
+              parentExternalId: payload.parentExternalId ?? null,
+              subtaskExternalIds: payload.subtaskExternalIds ?? [],
+              updatedAt: localTask.updatedAt,
+              completedAt: payload.completedAt,
+              url: payload.url,
+            });
+
+            if (created?.externalId) {
+              localTask.externalId = created.externalId;
+              localTask.externalSource = providerName;
+              SyncStateManager.addMapping(this.syncState, localTask.id, created.externalId);
+              pushed += 1;
+            } else {
+              errors.push({ taskId: localTask.id, operation: "push", message: "Create failed" });
+            }
+          }
+        } catch (error) {
+          errors.push({
+            taskId: localTask.id,
+            externalId: localTask.externalId ?? undefined,
+            operation: "push",
+            message: error instanceof Error ? error.message : String(error),
+          });
+        }
+      }
+    }
+
+    if (!options?.pushOnly) {
+      const knownExternalIds = Object.keys(this.syncState.reverseIdMap);
+      const remoteIds = new Set(remoteById.keys());
+
+      for (const externalId of knownExternalIds) {
+        if (remoteIds.has(externalId)) continue;
+
+        const localId = SyncStateManager.getLocalId(this.syncState, externalId);
+        if (!localId) continue;
+
+        const localTask = this.store.tasks.find((task) => task.id === localId);
+        if (!localTask || localTask.externalSource !== providerName) continue;
+
+        if (options?.dryRun) {
+          deleted += 1;
+          continue;
+        }
+
+        const removed = this.store.deleteTask(localTask.id);
+        if (removed) {
+          deleted += 1;
+          SyncStateManager.removeMapping(this.syncState, localTask.id);
+          this.syncState.deletedRemotely = this.syncState.deletedRemotely.filter((id) => id !== externalId);
+        }
+      }
+    }
+
+    const nowIso = new Date().toISOString();
+    if (!options?.dryRun) {
+      this.syncState.lastSyncAt[providerName] = nowIso;
+      await SyncStateManager.save(this.syncState);
+      await this.store.save();
+    }
+
+    return {
+      provider: providerName,
+      pulled,
+      pushed,
+      deleted,
+      conflicts,
+      errors,
+      timestamp: nowIso,
+      durationMs: Date.now() - startedAt,
+    };
   }
 
-  /** Import only — pull from external */
   async pullOnly(): Promise<SyncResult> {
-    const result: SyncResult = { pulled: 0, pushed: 0, conflicts: 0, errors: [] };
-
-    try {
-      const externalTasks = await this.provider.pull();
-      for (const ext of externalTasks) {
-        const existing = this.store.tasks.find(
-          (t) => t.externalId === ext.externalId && t.externalSource === this.provider.name
-        );
-        if (!existing) {
-          const mapped = this.provider.mapToTask(ext);
-          this.store.addTask({
-            title: mapped.title ?? ext.title,
-            description: mapped.description,
-            priority: mapped.priority,
-            project: mapped.project,
-            tags: mapped.tags,
-            dueDate: mapped.dueDate,
-          });
-          const newTask = this.store.tasks[this.store.tasks.length - 1]!;
-          newTask.externalId = ext.externalId;
-          newTask.externalSource = this.provider.name;
-          result.pulled++;
-        }
-      }
-      await this.store.save();
-    } catch (err) {
-      result.errors.push(err instanceof Error ? err.message : String(err));
-    }
-
-    return result;
+    return this.sync({ pullOnly: true });
   }
 
-  /** Export only — push to external */
   async pushOnly(): Promise<SyncResult> {
-    const result: SyncResult = { pulled: 0, pushed: 0, conflicts: 0, errors: [] };
+    return this.sync({ pushOnly: true });
+  }
+}
 
-    try {
-      const localTasks = this.store.tasks.filter((t) => t.status !== "archived");
-      const pushResult = await this.provider.push(localTasks);
-      result.pushed = pushResult.pushed;
-      result.errors.push(...pushResult.errors);
-    } catch (err) {
-      result.errors.push(err instanceof Error ? err.message : String(err));
-    }
-
-    return result;
+export function providerKeyToSource(provider: string): ExternalSource | null {
+  switch (provider) {
+    case "todoist":
+    case "linear":
+    case "asana":
+    case "claude-code":
+    case "codex":
+    case "github-issues":
+      return provider;
+    case "github":
+      return "github-issues";
+    default:
+      return null;
   }
 }
